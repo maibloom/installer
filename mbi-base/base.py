@@ -1,378 +1,247 @@
 #!/usr/bin/env python3
 """
-Arch Linux WiFi Connection Tool
-A TUI application with mouse support for connecting to WiFi networks
+Mai Bloom Operating Installation Base Builder Tool
 """
 
 import asyncio
 import subprocess
 import os
-import re
 import sys
-from typing import List, Dict, Optional, Tuple
-
-# For a custom distro, you'll want to add these dependencies:
-# - textual (pip install textual)
-# - rich (pip install rich)
-from textual import on
+from typing import List, Optional, Tuple
+from textual import on, work
 from textual.app import App, ComposeResult
 from textual.containers import Container, Vertical, Horizontal
 from textual.widgets import Button, Static, Input, Label, DataTable, Footer, Header
 from textual.reactive import reactive
 from textual.binding import Binding
-from rich.text import Text
-from rich.console import Console
-from rich.panel import Panel
-
-# Ensure running with appropriate permissions
-if os.geteuid() != 0:
-    console = Console()
-    console.print("[bold red]This script requires root privileges.[/bold red]")
-    console.print("Please run with: [bold]sudo python wifi_connect.py[/bold]")
-    sys.exit(1)
 
 class Network:
-    """Object representing a WiFi network."""
-    def __init__(self, ssid: str, security: str, bssid: str, signal: int):
+    """Represents a WiFi network with validation"""
+    def __init__(self, ssid: str, security: str, bssid: str, signal: str):
+        if not ssid:
+            raise ValueError("SSID cannot be empty")
         self.ssid = ssid
-        self.security = "Open" if not security else security
+        self.security = security if security else "Open"
         self.bssid = bssid
         self.signal = int(signal) if signal.isdigit() else 0
-        
+
     @property
     def signal_strength(self) -> str:
-        """Convert signal strength to bars."""
-        if self.signal >= 70:
-            return "▮▮▮▮"
-        elif self.signal >= 50:
-            return "▮▮▮"
-        elif self.signal >= 30:
-            return "▮▮"
-        else:
-            return "▮"
+        """Visual signal representation"""
+        return "▮" * max(1, min(4, self.signal // 25))
 
 class NetworkScanner:
-    """Handles WiFi network scanning using NetworkManager."""
-    
+    """Robust network scanner with retry logic"""
+    MAX_RETRIES = 3
+    RETRY_DELAY = 2
+
+    @classmethod
+    async def ensure_services(cls) -> bool:
+        """Ensure required services are running"""
+        for _ in range(cls.MAX_RETRIES):
+            try:
+                if not os.path.exists("/usr/bin/nmcli"):
+                    cls.install_package("networkmanager")
+                
+                result = subprocess.run(
+                    ["systemctl", "is-active", "NetworkManager"],
+                    capture_output=True, text=True
+                )
+                if "inactive" in result.stdout.lower():
+                    subprocess.run(["systemctl", "start", "NetworkManager"], check=True)
+                return True
+            except subprocess.CalledProcessError as e:
+                await asyncio.sleep(cls.RETRY_DELAY)
+        return False
+
     @staticmethod
-    def ensure_networkmanager() -> bool:
-        """Ensure NetworkManager is installed and running."""
+    def install_package(pkg: str) -> None:
+        """Package installation with error handling"""
         try:
-            # Check if installed
-            if subprocess.run(["which", "nmcli"], capture_output=True).returncode != 0:
-                subprocess.run(["pacman", "-Sy", "--noconfirm", "networkmanager"], check=True)
-                
-            # Start service if not running
-            if subprocess.run(["systemctl", "is-active", "NetworkManager"], 
-                              capture_output=True).returncode != 0:
-                subprocess.run(["systemctl", "enable", "--now", "NetworkManager"], check=True)
-                
-            return True
-        except subprocess.SubprocessError:
-            return False
-    
+            subprocess.run(
+                ["pacman", "-Sy", "--noconfirm", pkg],
+                check=True,
+                stderr=subprocess.DEVNULL
+            )
+        except subprocess.CalledProcessError:
+            raise RuntimeError(f"Failed to install {pkg}")
+
+    @classmethod
+    async def scan(cls) -> List[Network]:
+        """Network scanning with retries"""
+        for attempt in range(cls.MAX_RETRIES):
+            try:
+                subprocess.run(
+                    ["nmcli", "dev", "wifi", "rescan"],
+                    check=True, timeout=10
+                )
+                result = subprocess.run(
+                    ["nmcli", "-t", "-f", "SSID,SECURITY,BSSID,SIGNAL", "dev", "wifi", "list"],
+                    capture_output=True, text=True, timeout=15
+                )
+                return cls.parse_results(result.stdout)
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                if attempt == cls.MAX_RETRIES - 1:
+                    raise
+                await asyncio.sleep(cls.RETRY_DELAY)
+        return []
+
     @staticmethod
-    def scan_networks() -> List[Network]:
-        """Scan for available WiFi networks."""
+    def parse_results(output: str) -> List[Network]:
+        """Safe results parsing"""
         networks = []
-        
-        # Force a rescan
-        subprocess.run(["nmcli", "dev", "wifi", "rescan"], capture_output=True)
-        
-        # Get networks list
-        output = subprocess.run(
-            ["nmcli", "-t", "-f", "SSID,SECURITY,BSSID,SIGNAL", "dev", "wifi", "list"],
-            capture_output=True, text=True
-        ).stdout
-        
-        for line in output.splitlines():
-            if not line.strip():
-                continue
-                
-            parts = line.split(":")
-            if len(parts) >= 4:
-                ssid, security, bssid, signal = parts[0], parts[1], parts[2], parts[3]
-                if ssid:  # Skip empty SSIDs
-                    networks.append(Network(ssid, security, bssid, signal))
-        
-        # Sort by signal strength
-        return sorted(networks, key=lambda n: n.signal, reverse=True)
-    
-    @staticmethod
-    def connect_to_network(ssid: str, password: Optional[str] = None) -> Tuple[bool, str]:
-        """Connect to a WiFi network."""
+        for line in output.strip().split('\n'):
+            parts = line.strip().split(':', 3)
+            if len(parts) >= 4 and parts[0]:
+                try:
+                    networks.append(Network(*parts))
+                except ValueError:
+                    continue
+        return sorted(networks, key=lambda x: x.signal, reverse=True)
+
+    @classmethod
+    async def connect(cls, ssid: str, password: Optional[str] = None) -> Tuple[bool, str]:
+        """Connection handler with retries"""
         cmd = ["nmcli", "dev", "wifi", "connect", ssid]
         if password:
             cmd.extend(["password", password])
-            
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            return True, "Connected successfully"
-        else:
-            return False, result.stderr or "Unknown error"
+
+        for attempt in range(cls.MAX_RETRIES):
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                if result.returncode == 0:
+                    return True, "Connected successfully"
+                elif "Secrets were required" in result.stderr:
+                    return False, "Invalid password"
+            except subprocess.TimeoutExpired:
+                if attempt == cls.MAX_RETRIES - 1:
+                    return False, "Connection timed out"
+            await asyncio.sleep(cls.RETRY_DELAY)
+        return False, "Maximum retries exceeded"
 
 class WiFiConnector(App):
-    """Main application for WiFi connection."""
-    
-    BINDINGS = [
-        Binding("q", "quit", "Quit"),
-        Binding("r", "refresh", "Refresh Networks"),
-        Binding("h", "hidden_network", "Hidden Network"),
-    ]
-    
+    """Main application class with enhanced state management"""
+    BINDINGS = [Binding("q", "quit", "Quit")]
     CSS = """
-    #main {
-        width: 100%;
-        height: 100%;
-        background: #1a1b26;
-    }
-    
-    Header {
-        background: #414868;
-        color: #c0caf5;
-        text-align: center;
-        padding: 1;
-    }
-    
-    DataTable {
-        width: 100%;
-        height: 1fr;
-    }
-    
-    #status {
-        height: auto;
-        background: #1a1b26;
-        padding: 1;
-        color: #7aa2f7;
-    }
-    
-    Button {
-        margin: 1 2;
-    }
-    
-    #connect-btn {
-        background: #7aa2f7;
-        color: #1a1b26;
-    }
-    
-    #refresh-btn {
-        background: #9ece6a;
-        color: #1a1b26;
-    }
-    
-    .password-container {
-        height: auto;
-        margin: 1;
-        background: #24283b;
-        padding: 1;
-        border: tall #414868;
-    }
-    
-    Input {
-        margin: 1 1;
-    }
-    
-    Label {
-        margin: 1 1;
-    }
+    #main { width: 100%; height: 100%; }
+    .hidden { display: none; }
+    #password-container { padding: 1; border: round #666; }
     """
-    
-    status = reactive("Scanning for networks...")
-    networks: List[Network] = reactive([])
-    selected_network: Optional[Network] = reactive(None)
-    
+
+    status = reactive("Initializing...")
+    networks = reactive([])
+    selected_network = reactive(None, init=False)
+    connection_attempts = reactive(0)
+
     def __init__(self):
         super().__init__()
         self.scanner = NetworkScanner()
-        
-    def on_mount(self) -> None:
-        """When app is mounted, scan for networks."""
-        self.networks_table.focus()
-        asyncio.create_task(self.initial_setup())
-        
-    async def initial_setup(self) -> None:
-        """Initialize NetworkManager and perform initial scan."""
-        self.status = "Ensuring NetworkManager is running..."
-        
-        # Run in a separate thread to avoid blocking
-        success = await asyncio.to_thread(self.scanner.ensure_networkmanager)
-        if not success:
-            self.status = "⚠️ Failed to initialize NetworkManager"
-            return
-            
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Container(id="main"):
+            yield DataTable(id="networks-table")
+            with Vertical(id="password-container", classes="hidden"):
+                yield Label("", id="network-label")
+                yield Input(password=True, id="password-input")
+                with Horizontal():
+                    yield Button("Connect", id="connect-btn")
+                    yield Button("Cancel", id="cancel-btn")
+            yield Static(id="status")
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        """Initial setup with proper error handling"""
+        self.query_one("#networks-table").add_columns("SSID", "Security", "Signal", "BSSID")
+        await self.initialize_services()
         await self.refresh_networks()
-        
+
+    @work(exclusive=True)
+    async def initialize_services(self) -> None:
+        """Service initialization with status updates"""
+        self.status = "Checking NetworkManager..."
+        if not await self.scanner.ensure_services():
+            self.status = "⚠️ Failed to start NetworkManager"
+            return
+        self.status = "Ready"
+
+    @work(exclusive=True)
     async def refresh_networks(self) -> None:
-        """Scan for networks and update the table."""
-        self.status = "Scanning for networks..."
-        self.networks_table.clear()
-        
+        """Network scanning with loading state"""
+        self.status = "Scanning networks..."
         try:
-            # Run scan in separate thread to avoid blocking UI
-            networks = await asyncio.to_thread(self.scanner.scan_networks)
-            
-            # Update table with results
-            for network in networks:
-                self.networks_table.add_row(
-                    network.ssid,
-                    network.security,
-                    network.signal_strength,
-                    network.bssid,
-                    network
-                )
-                
+            networks = await self.scanner.scan()
+            table = self.query_one("#networks-table")
+            table.clear()
+            for net in networks:
+                table.add_row(net.ssid, net.security, net.signal_strength, net.bssid, key=net.ssid)
             self.networks = networks
             self.status = f"Found {len(networks)} networks"
         except Exception as e:
-            self.status = f"Error scanning: {str(e)}"
-    
-    def action_refresh(self) -> None:
-        """Action to refresh networks list."""
-        asyncio.create_task(self.refresh_networks())
-    
-    def action_hidden_network(self) -> None:
-        """Show dialog for connecting to hidden network."""
-        self.show_password_prompt(hidden=True)
-    
-    def compose(self) -> ComposeResult:
-        """Create UI layout."""
-        yield Header(show_clock=True)
-        
-        with Container(id="main"):
-            yield DataTable(id="networks-table")
-            
-            # Password prompt (initially hidden)
-            with Vertical(id="password-container", classes="password-container"):
-                yield Label("Enter password:", id="network-label")
-                yield Input(id="password-input", password=True)
-                
-                with Horizontal():
-                    yield Button("Connect", id="connect-btn", variant="primary")
-                    yield Button("Cancel", id="cancel-btn", variant="default")
-            
-            # Status bar
-            yield Static(id="status")
-            
-            # Bottom buttons
-            with Horizontal():
-                yield Button("Refresh Networks", id="refresh-btn")
-                yield Button("Hidden Network", id="hidden-btn")
-                yield Button("Quit", id="quit-btn")
-                
-        yield Footer()
-    
-    def on_mount(self) -> None:
-        """Initialize the application."""
-        # Set up the networks table
-        table = self.query_one("#networks-table", DataTable)
-        table.add_columns("SSID", "Security", "Signal", "BSSID")
-        
-        # Hide password container initially
-        self.query_one("#password-container").display = False
-        
-        # Start network scanning
-        asyncio.create_task(self.initial_setup())
-    
+            self.status = f"Scan failed: {str(e)}"
+
     @on(DataTable.RowSelected)
-    def on_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Handle selection of a network row."""
-        row = event.data_table.get_row_at(event.row_key)
-        self.selected_network = row[-1]  # The Network object is the last column
-        
-        if self.selected_network.security.lower() != "open":
+    def handle_selection(self, event: DataTable.RowSelected) -> None:
+        """Handle network selection with validation"""
+        if not (row := event.data_table.get_row(event.row_key)):
+            return
+        try:
+            self.selected_network = Network(row[0], row[1], row[3], row[2])
             self.show_password_prompt()
-        else:
-            asyncio.create_task(self.connect_without_password())
-    
-    async def connect_without_password(self) -> None:
-        """Connect to an open network."""
+        except ValueError:
+            self.status = "Invalid network selection"
+
+    def show_password_prompt(self) -> None:
+        """Safe password prompt display"""
         if not self.selected_network:
             return
             
-        self.status = f"Connecting to {self.selected_network.ssid}..."
-        success, message = await asyncio.to_thread(
-            self.scanner.connect_to_network, 
-            self.selected_network.ssid
-        )
-        
-        self.status = message
-    
-    def show_password_prompt(self, hidden: bool = False) -> None:
-        """Show password input dialog."""
         container = self.query_one("#password-container")
-        password_input = self.query_one("#password-input", Input)
-        network_label = self.query_one("#network-label", Label)
-        
-        password_input.value = ""
-        
-        if hidden:
-            network_label.update("Hidden Network SSID:")
-            password_input.password = False
-            self.selected_network = None
-        else:
-            network_label.update(f"Password for {self.selected_network.ssid}:")
-            password_input.password = True
-        
-        container.display = True
-        password_input.focus()
-    
+        container.remove_class("hidden")
+        self.query_one("#network-label").update(
+            f"Password for {self.selected_network.ssid}:"
+        )
+        self.query_one("#password-input").focus()
+
     @on(Button.Pressed, "#connect-btn")
-    def on_connect_pressed(self) -> None:
-        """Handle the Connect button press."""
-        password_input = self.query_one("#password-input", Input)
-        password = password_input.value
-        network_label = self.query_one("#network-label", Label)
-        
-        # Check if this is for a hidden network
-        if self.selected_network is None:
-            ssid = password  # For hidden networks, the SSID is in the first input
-            self.query_one("#password-container").display = False
-            self.show_password_prompt(hidden=False)
-            network_label.update(f"Password for {ssid}:")
-            self.selected_network = Network(ssid, "Unknown", "unknown", "0")
-            return
-            
-        # Normal network connection
-        self.query_one("#password-container").display = False
-        asyncio.create_task(self.connect_with_password(password))
-    
-    @on(Button.Pressed, "#cancel-btn")
-    def on_cancel_pressed(self) -> None:
-        """Handle the Cancel button press."""
-        self.query_one("#password-container").display = False
-    
-    @on(Button.Pressed, "#refresh-btn")
-    def on_refresh_button(self) -> None:
-        """Handle refresh button press."""
-        self.action_refresh()
-    
-    @on(Button.Pressed, "#hidden-btn")
-    def on_hidden_button(self) -> None:
-        """Handle hidden network button press."""
-        self.action_hidden_network()
-    
-    @on(Button.Pressed, "#quit-btn")
-    def on_quit_button(self) -> None:
-        """Handle quit button press."""
-        self.exit()
-    
-    async def connect_with_password(self, password: str) -> None:
-        """Connect to a secured network with password."""
+    async def handle_connection(self) -> None:
+        """Connection handler with state validation"""
+        password = self.query_one("#password-input").value
         if not self.selected_network:
+            self.status = "No network selected"
             return
-            
+
         self.status = f"Connecting to {self.selected_network.ssid}..."
-        success, message = await asyncio.to_thread(
-            self.scanner.connect_to_network, 
-            self.selected_network.ssid,
+        success, message = await self.scanner.connect(
+            self.selected_network.ssid, 
             password
         )
         
-        self.status = message
+        if success:
+            self.status = f"Connected to {self.selected_network.ssid}!"
+            self.exit()
+        else:
+            self.status = f"Connection failed: {message}"
+            self.connection_attempts += 1
+            if self.connection_attempts >= 3:
+                self.status += " - Reset required"
+                self.selected_network = None
+                self.connection_attempts = 0
+
+    @on(Button.Pressed, "#cancel-btn")
+    def cancel_connection(self) -> None:
+        """Cancel handler with state cleanup"""
+        self.query_one("#password-container").add_class("hidden")
+        self.selected_network = None
+        self.status = "Operation cancelled"
 
 if __name__ == "__main__":
-    # Initialize app
-    app = WiFiConnector()
-    app.run()
-
+    if os.geteuid() != 0:
+        print("This script requires root privileges. Use sudo.")
+        sys.exit(1)
+    WiFiConnector().run()
