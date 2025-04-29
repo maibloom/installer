@@ -1,67 +1,62 @@
-import curses
-import os
-import subprocess
+import urwid
 
-def main(stdscr):
-    # Clear screen
-    stdscr.clear()
+def exit_on_q(key):
+    if key in ('q', 'Q'):
+        raise urwid.ExitMainLoop()
 
-    # Initialize curses settings
-    curses.curs_set(1)  # Enable cursor
-    stdscr.nodelay(0)   # Wait for user input
+def show_or_exit(button):
+    response = urwid.Text([u'You pressed: ', button.get_label()])
+    done = urwid.Button(u'Ok')
+    urwid.connect_signal(done, 'click', exit_on_q)
+    main.original_widget = urwid.Filler(urwid.Pile([response, urwid.AttrMap(done, None, focus_map='reversed')]))
 
-    # Display welcome message
-    stdscr.addstr("Welcome to Mai Bloom Operating System Installer\n", curses.A_BOLD)
-    stdscr.addstr("Please follow the instructions to configure your internet settings.\n\n")
-    stdscr.refresh()
+def main_menu(button):
+    button_1 = urwid.Button(u'Configure Network')
+    button_2 = urwid.Button(u'Start Installation')
+    urwid.connect_signal(button_1, 'click', configure_network)
+    urwid.connect_signal(button_2, 'click', start_installation)
 
-    # Internet configuration
-    stdscr.addstr("Enter your network interface (e.g., eth0, wlan0): ")
-    stdscr.refresh()
-    network_interface = stdscr.getstr().decode('utf-8')
+    menu = urwid.Text([u'Main Menu\n', u'Please select an option:'])
+    menu_buttons = urwid.GridFlow([button_1, button_2], cell_width=20, h_sep=2, v_sep=1, align='center')
+    main.original_widget = urwid.Filler(urwid.Pile([menu, urwid.Divider('-'), menu_buttons]))
 
-    stdscr.addstr("Enter your IP address: ")
-    stdscr.refresh()
-    ip_address = stdscr.getstr().decode('utf-8')
+def configure_network(button):
+    # Implement network configuration logic here
+    network_interface = urwid.Edit(u'Network Interface: ')
+    ip_address = urwid.Edit(u'IP Address: ')
+    gateway = urwid.Edit(u'Gateway: ')
+    dns_server = urwid.Edit(u'DNS Server: ')
 
-    stdscr.addstr("Enter your gateway: ")
-    stdscr.refresh()
-    gateway = stdscr.getstr().decode('utf-8')
+    save_button = urwid.Button(u'Save')
+    urwid.connect_signal(save_button, 'click', lambda x: show_or_exit(save_button))
 
-    stdscr.addstr("Enter your DNS server: ")
-    stdscr.refresh()
-    dns_server = stdscr.getstr().decode('utf-8')
+    network_form = urwid.Pile([network_interface, ip_address, gateway, dns_server, urwid.Divider('-'), save_button])
+    main.original_widget = urwid.Filler(urwid.Pile([urwid.Text(u'Network Configuration'), urwid.Divider('-'), network_form]))
 
-    # Display configuration summary
-    stdscr.addstr("\nConfiguration Summary:\n", curses.A_BOLD)
-    stdscr.addstr(f"Network Interface: {network_interface}\n")
-    stdscr.addstr(f"IP Address: {ip_address}\n")
-    stdscr.addstr(f"Gateway: {gateway}\n")
-    stdscr.addstr(f"DNS Server: {dns_server}\n\n")
-    stdscr.refresh()
+def start_installation(button):
+    # Implement installation logic here
+    response = urwid.Text([u'Starting installation...'])
+    done = urwid.Button(u'Ok')
+    urwid.connect_signal(done, 'click', exit_on_q)
+    main.original_widget = urwid.Filler(urwid.Pile([response, urwid.AttrMap(done, None, focus_map='reversed')]))
 
-    # Confirm configuration
-    stdscr.addstr("Press 'Y' to confirm and proceed with installation, or 'N' to cancel: ")
-    stdscr.refresh()
-    confirm = stdscr.getch()
+    # Run the installation bash script
+    try:
+        import subprocess
+        subprocess.run(["bash", "install.sh"], check=True)
+        response.set_text(u'Installation completed successfully!')
+    except subprocess.CalledProcessError as e:
+        response.set_text(f"Installation failed: {e}")
 
-    if confirm == ord('Y') or confirm == ord('y'):
-        stdscr.addstr("\nProceeding with installation...\n")
-        stdscr.refresh()
+if __name__ == '__main__':
+    main_button = urwid.Button(u'Main Menu')
+    urwid.connect_signal(main_button, 'click', main_menu)
 
-        # Run the installation bash script
-        try:
-            subprocess.run(["bash", "install.sh"], check=True)
-            stdscr.addstr("Installation completed successfully!\n")
-        except subprocess.CalledProcessError as e:
-            stdscr.addstr(f"Installation failed: {e}\n")
-    else:
-        stdscr.addstr("\nInstallation cancelled.\n")
+    main = urwid.Padding(urwid.Filler(urwid.Pile([main_button])), left=2, right=2)
+    top = urwid.Overlay(main, urwid.SolidFill(u'\N{MEDIUM SHADE}'),
+                        align='center', width=('relative', 60),
+                        valign='middle', height=('relative', 60),
+                        min_width=20, min_height=9)
 
-    stdscr.refresh()
-    stdscr.getch()
-
-# Run the curses application
-curses.wrapper(main)
-
+    urwid.MainLoop(top, palette=[('reversed', 'standout', '')]).run()
 
