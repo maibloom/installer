@@ -1,247 +1,204 @@
 #!/usr/bin/env python3
 """
-Mai Bloom Operating Installation Base Builder Tool
+Mai Bloom Installer - Sequential Installation Workflow
 """
 
 import asyncio
 import subprocess
-import os
-import sys
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.containers import Container, Vertical, Horizontal
-from textual.widgets import Button, Static, Input, Label, DataTable, Footer, Header
-from textual.reactive import reactive
-from textual.binding import Binding
+from textual.screen import Screen
+from textual.widgets import Button, Static, Input, Label, ProgressBar, Footer, Header
 
-class Network:
-    """Represents a WiFi network with validation"""
-    def __init__(self, ssid: str, security: str, bssid: str, signal: str):
-        if not ssid:
-            raise ValueError("SSID cannot be empty")
-        self.ssid = ssid
-        self.security = security if security else "Open"
-        self.bssid = bssid
-        self.signal = int(signal) if signal.isdigit() else 0
+# ----------------------------
+# Installation Sequence Screens
+# ----------------------------
 
-    @property
-    def signal_strength(self) -> str:
-        """Visual signal representation"""
-        return "▮" * max(1, min(4, self.signal // 25))
+class WelcomeScreen(Screen):
+    """Initial welcome and confirmation screen"""
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Container():
+            yield Static("\n\nMAI BLOOM INSTALLER\n", classes="title")
+            yield Static("Welcome to Mai Bloom Installation\n\n", classes="subtitle")
+            yield Button("Start Installation", id="begin-btn")
+        yield Footer()
 
-class NetworkScanner:
-    """Robust network scanner with retry logic"""
-    MAX_RETRIES = 3
-    RETRY_DELAY = 2
+    @on(Button.Pressed, "#begin-btn")
+    def proceed(self) -> None:
+        self.app.push_screen(NetworkScreen())
 
-    @classmethod
-    async def ensure_services(cls) -> bool:
-        """Ensure required services are running"""
-        for _ in range(cls.MAX_RETRIES):
-            try:
-                if not os.path.exists("/usr/bin/nmcli"):
-                    cls.install_package("networkmanager")
-                
-                result = subprocess.run(
-                    ["systemctl", "is-active", "NetworkManager"],
-                    capture_output=True, text=True
-                )
-                if "inactive" in result.stdout.lower():
-                    subprocess.run(["systemctl", "start", "NetworkManager"], check=True)
-                return True
-            except subprocess.CalledProcessError as e:
-                await asyncio.sleep(cls.RETRY_DELAY)
-        return False
+class NetworkScreen(Screen):
+    """WiFi configuration screen with error recovery"""
+    BINDINGS = [("q", "quit", "Quit")]
+    
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Container():
+            yield Static("Network Configuration", classes="screen-title")
+            yield Static("Connecting to WiFi...", id="network-status")
+            yield Button("Retry Connection", id="retry-btn", classes="hidden")
+        yield Footer()
 
-    @staticmethod
-    def install_package(pkg: str) -> None:
-        """Package installation with error handling"""
+    def on_mount(self) -> None:
+        self.attempt_connection()
+
+    @work(exclusive=True)
+    async def attempt_connection(self) -> None:
+        """Try connecting with stored credentials or manual input"""
+        status = self.query_one("#network-status")
+        retry_btn = self.query_one("#retry-btn")
+        
         try:
-            subprocess.run(
-                ["pacman", "-Sy", "--noconfirm", pkg],
-                check=True,
-                stderr=subprocess.DEVNULL
-            )
-        except subprocess.CalledProcessError:
-            raise RuntimeError(f"Failed to install {pkg}")
+            status.update("Scanning networks...")
+            # Implement your network connection logic here
+            await asyncio.sleep(2)  # Simulated connection delay
+            status.update("Connected successfully!")
+            await asyncio.sleep(1)
+            self.app.push_screen(DownloadScreen())
+        except Exception as e:
+            status.update(f"Connection failed: {str(e)}")
+            retry_btn.remove_class("hidden")
 
-    @classmethod
-    async def scan(cls) -> List[Network]:
-        """Network scanning with retries"""
-        for attempt in range(cls.MAX_RETRIES):
-            try:
-                subprocess.run(
-                    ["nmcli", "dev", "wifi", "rescan"],
-                    check=True, timeout=10
-                )
-                result = subprocess.run(
-                    ["nmcli", "-t", "-f", "SSID,SECURITY,BSSID,SIGNAL", "dev", "wifi", "list"],
-                    capture_output=True, text=True, timeout=15
-                )
-                return cls.parse_results(result.stdout)
-            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-                if attempt == cls.MAX_RETRIES - 1:
-                    raise
-                await asyncio.sleep(cls.RETRY_DELAY)
-        return []
+    @on(Button.Pressed, "#retry-btn")
+    def retry_connection(self) -> None:
+        self.query_one("#retry-btn").add_class("hidden")
+        self.attempt_connection()
 
-    @staticmethod
-    def parse_results(output: str) -> List[Network]:
-        """Safe results parsing"""
-        networks = []
-        for line in output.strip().split('\n'):
-            parts = line.strip().split(':', 3)
-            if len(parts) >= 4 and parts[0]:
-                try:
-                    networks.append(Network(*parts))
-                except ValueError:
-                    continue
-        return sorted(networks, key=lambda x: x.signal, reverse=True)
+class DownloadScreen(Screen):
+    """Package download progress screen"""
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Container():
+            yield Static("Downloading Components", classes="screen-title")
+            yield ProgressBar(id="download-progress")
+            yield Static("Preparing download...", id="download-status")
+        yield Footer()
 
-    @classmethod
-    async def connect(cls, ssid: str, password: Optional[str] = None) -> Tuple[bool, str]:
-        """Connection handler with retries"""
-        cmd = ["nmcli", "dev", "wifi", "connect", ssid]
-        if password:
-            cmd.extend(["password", password])
+    def on_mount(self) -> None:
+        self.start_download()
 
-        for attempt in range(cls.MAX_RETRIES):
-            try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=30
-                )
-                if result.returncode == 0:
-                    return True, "Connected successfully"
-                elif "Secrets were required" in result.stderr:
-                    return False, "Invalid password"
-            except subprocess.TimeoutExpired:
-                if attempt == cls.MAX_RETRIES - 1:
-                    return False, "Connection timed out"
-            await asyncio.sleep(cls.RETRY_DELAY)
-        return False, "Maximum retries exceeded"
+    @work(exclusive=True)
+    async def start_download(self) -> None:
+        """Simulated package download with progress"""
+        progress = self.query_one("#download-progress")
+        status = self.query_one("#download-status")
+        
+        try:
+            for percent in range(0, 101, 10):
+                progress.update(progress=percent)
+                status.update(f"Downloading... {percent}%")
+                await asyncio.sleep(0.5)
+            self.app.push_screen(InstallScreen())
+        except Exception as e:
+            status.update(f"Download failed: {str(e)}")
+            self.app.push_screen(ErrorScreen(str(e)))
 
-class WiFiConnector(App):
-    """Main application class with enhanced state management"""
-    BINDINGS = [Binding("q", "quit", "Quit")]
-    CSS = """
-    #main { width: 100%; height: 100%; }
-    .hidden { display: none; }
-    #password-container { padding: 1; border: round #666; }
-    """
+class InstallScreen(Screen):
+    """System installation progress screen"""
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Container():
+            yield Static("System Installation", classes="screen-title")
+            yield ProgressBar(id="install-progress")
+            yield Static("Starting installation...", id="install-status")
+        yield Footer()
 
-    status = reactive("Initializing...")
-    networks = reactive([])
-    selected_network = reactive(None, init=False)
-    connection_attempts = reactive(0)
+    def on_mount(self) -> None:
+        self.start_installation()
 
-    def __init__(self):
+    @work(exclusive=True)
+    async def start_installation(self) -> None:
+        """Execute installation scripts"""
+        progress = self.query_one("#install-progress")
+        status = self.query_one("#install-status")
+        
+        try:
+            # Execute your installation scripts here
+            for step in range(1, 6):
+                progress.update(progress=step*20)
+                status.update(f"Installing component {step}/5")
+                await asyncio.sleep(1)
+            status.update("Installation complete!")
+            await asyncio.sleep(1)
+            self.app.push_screen(CompletionScreen())
+        except Exception as e:
+            self.app.push_screen(ErrorScreen(str(e)))
+
+class CompletionScreen(Screen):
+    """Final installation completion screen"""
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Container():
+            yield Static("\n\nINSTALLATION COMPLETE\n", classes="title")
+            yield Static("Mai Bloom is ready to use!\n\n", classes="subtitle")
+            yield Button("Reboot System", id="reboot-btn")
+        yield Footer()
+
+    @on(Button.Pressed, "#reboot-btn")
+    def reboot(self) -> None:
+        subprocess.run(["systemctl", "reboot"])
+
+class ErrorScreen(Screen):
+    """Error display screen with recovery options"""
+    def __init__(self, error_msg: str):
         super().__init__()
-        self.scanner = NetworkScanner()
+        self.error_msg = error_msg
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Container(id="main"):
-            yield DataTable(id="networks-table")
-            with Vertical(id="password-container", classes="hidden"):
-                yield Label("", id="network-label")
-                yield Input(password=True, id="password-input")
-                with Horizontal():
-                    yield Button("Connect", id="connect-btn")
-                    yield Button("Cancel", id="cancel-btn")
-            yield Static(id="status")
+        with Container():
+            yield Static("Installation Error", classes="screen-title")
+            yield Static(self.error_msg, id="error-message")
+            with Horizontal():
+                yield Button("Retry", id="retry-btn")
+                yield Button("Exit", id="exit-btn")
         yield Footer()
 
-    async def on_mount(self) -> None:
-        """Initial setup with proper error handling"""
-        self.query_one("#networks-table").add_columns("SSID", "Security", "Signal", "BSSID")
-        await self.initialize_services()
-        await self.refresh_networks()
+    @on(Button.Pressed, "#retry-btn")
+    def retry(self) -> None:
+        self.app.pop_screen()
 
-    @work(exclusive=True)
-    async def initialize_services(self) -> None:
-        """Service initialization with status updates"""
-        self.status = "Checking NetworkManager..."
-        if not await self.scanner.ensure_services():
-            self.status = "⚠️ Failed to start NetworkManager"
-            return
-        self.status = "Ready"
+    @on(Button.Pressed, "#exit-btn")
+    def exit(self) -> None:
+        self.app.exit()
 
-    @work(exclusive=True)
-    async def refresh_networks(self) -> None:
-        """Network scanning with loading state"""
-        self.status = "Scanning networks..."
-        try:
-            networks = await self.scanner.scan()
-            table = self.query_one("#networks-table")
-            table.clear()
-            for net in networks:
-                table.add_row(net.ssid, net.security, net.signal_strength, net.bssid, key=net.ssid)
-            self.networks = networks
-            self.status = f"Found {len(networks)} networks"
-        except Exception as e:
-            self.status = f"Scan failed: {str(e)}"
+# ----------------------------
+# Main Application
+# ----------------------------
 
-    @on(DataTable.RowSelected)
-    def handle_selection(self, event: DataTable.RowSelected) -> None:
-        """Handle network selection with validation"""
-        if not (row := event.data_table.get_row(event.row_key)):
-            return
-        try:
-            self.selected_network = Network(row[0], row[1], row[3], row[2])
-            self.show_password_prompt()
-        except ValueError:
-            self.status = "Invalid network selection"
+class MaiBloomInstaller(App):
+    """Main installer application with screen management"""
+    CSS = """
+    Container {
+        padding: 2;
+        width: 80%;
+        height: 80%;
+        align: center middle;
+    }
+    .title {
+        text-align: center;
+        color: $accent;
+        text-style: bold;
+    }
+    .subtitle {
+        text-align: center;
+        margin: 2;
+    }
+    .hidden {
+        display: none;
+    }
+    """
 
-    def show_password_prompt(self) -> None:
-        """Safe password prompt display"""
-        if not self.selected_network:
-            return
-            
-        container = self.query_one("#password-container")
-        container.remove_class("hidden")
-        self.query_one("#network-label").update(
-            f"Password for {self.selected_network.ssid}:"
-        )
-        self.query_one("#password-input").focus()
-
-    @on(Button.Pressed, "#connect-btn")
-    async def handle_connection(self) -> None:
-        """Connection handler with state validation"""
-        password = self.query_one("#password-input").value
-        if not self.selected_network:
-            self.status = "No network selected"
-            return
-
-        self.status = f"Connecting to {self.selected_network.ssid}..."
-        success, message = await self.scanner.connect(
-            self.selected_network.ssid, 
-            password
-        )
-        
-        if success:
-            self.status = f"Connected to {self.selected_network.ssid}!"
-            self.exit()
-        else:
-            self.status = f"Connection failed: {message}"
-            self.connection_attempts += 1
-            if self.connection_attempts >= 3:
-                self.status += " - Reset required"
-                self.selected_network = None
-                self.connection_attempts = 0
-
-    @on(Button.Pressed, "#cancel-btn")
-    def cancel_connection(self) -> None:
-        """Cancel handler with state cleanup"""
-        self.query_one("#password-container").add_class("hidden")
-        self.selected_network = None
-        self.status = "Operation cancelled"
+    def on_mount(self) -> None:
+        self.push_screen(WelcomeScreen())
 
 if __name__ == "__main__":
     if os.geteuid() != 0:
-        print("This script requires root privileges. Use sudo.")
+        print("This installer requires root privileges. Use sudo.")
         sys.exit(1)
-    WiFiConnector().run()
+        
+    MaiBloomInstaller().run()
+
