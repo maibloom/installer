@@ -182,11 +182,10 @@ class LaunchScreen(Screen):
 
 # ------------------------ Main Textual App ------------------------
 class MaiBloomInstallerApp(App):
-    CSS_PATH = None  # You may use CSS to further style your widgets if desired.
+    CSS_PATH = None
     temp_dir: str = reactive("")
 
     async def on_exit(self) -> None:
-        # If the app is exiting and we have an installer script, launch it.
         installer_script = self.exit_result
         if installer_script:
             try:
@@ -206,4 +205,4 @@ class MaiBloomInstallerApp(App):
 
 if __name__ == "__main__":
     # Launch the full-screen TUI app.
-    MaiBloomInstallerApp().run(title="Mai Bloom OS Installer")
+    MaiBloomInstallerApp().run()
