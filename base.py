@@ -6,11 +6,11 @@ import sys
 import tempfile
 
 from textual.app import App, ComposeResult
-from textual.containers import Container, Vertical
-from textual.screen import Screen
 from textual.widgets import Header, Footer, Button, Static, Input
-from textual.reactive import reactive
+from textual.screen import Screen
 from textual import events
+
+# ------------------------ Blocking Helper Functions ------------------------
 
 def check_network_manager_blocking() -> bool:
     """Check NetworkManager status and try to start it if not running."""
@@ -55,11 +55,13 @@ def run_installer_blocking(installer_script: str):
     """Launch the main installer by running the script."""
     subprocess.check_call(['python3', installer_script])
 
+# ------------------------ TUI Screens ------------------------
+
 class WelcomeScreen(Screen):
-    """A welcome screen with a Start button."""
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Static("Welcome to the Mai Bloom OS Installer", id="welcome", style="bold magenta", expand=True)
+        # Embed Rich markup directly in the string
+        yield Static("[bold magenta]Welcome to the Mai Bloom OS Installer[/bold magenta]", id="welcome")
         yield Button("Start", id="start")
         yield Footer()
 
@@ -68,15 +70,11 @@ class WelcomeScreen(Screen):
             await self.app.push_screen(NetworkScreen())
 
 class NetworkScreen(Screen):
-    """Screen to check network services, list networks, and collect connection details."""
-    ssid_input: Input
-    password_input: Input
-    message_area: Static
-
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Static("Network Configuration", style="bold cyan", expand=False)
-        yield Static(id="networks", expand=True)
+        yield Static("[bold cyan]Network Configuration[/bold cyan]")
+        # Placeholder for network listing
+        yield Static("", id="networks")
         self.ssid_input = Input(placeholder="Enter SSID", id="ssid")
         self.password_input = Input(placeholder="Enter Password", password=True, id="password")
         yield self.ssid_input
@@ -114,12 +112,9 @@ class NetworkScreen(Screen):
                 self.message_area.update("[bold red]Failed to connect. Please recheck your credentials.[/bold red]")
 
 class CloneScreen(Screen):
-    """Screen to clone the installer repository with simulated progress."""
-    progress_area: Static
-
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Static("Cloning the Mai Bloom Installer Repository", style="bold cyan")
+        yield Static("[bold cyan]Cloning the Mai Bloom Installer Repository[/bold cyan]")
         self.progress_area = Static("Starting clone...", id="progress")
         yield self.progress_area
         yield Footer()
@@ -142,12 +137,9 @@ class CloneScreen(Screen):
             self.progress_area.update("[bold red]Error cloning the installer repository.[/bold red]")
 
 class LaunchScreen(Screen):
-    """Screen to launch the installer."""
-    message_area: Static
-
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Static("Launching the Mai Bloom Installation Wizard", style="bold cyan", expand=False)
+        yield Static("[bold cyan]Launching the Mai Bloom Installation Wizard[/bold cyan]")
         self.message_area = Static("Please wait...", id="launch_msg")
         yield self.message_area
         yield Footer()
@@ -162,10 +154,11 @@ class LaunchScreen(Screen):
         await asyncio.sleep(1)
         self.app.exit(result=installer_script)
 
-class MaiBloomInstallerApp(App):
-    CSS_PATH = None
-    temp_dir: str = reactive("")
+# ------------------------ Main Textual App ------------------------
 
+class MaiBloomInstallerApp(App):
+    temp_dir: str = ""
+    
     async def on_exit(self) -> None:
         installer_script = self.exit_result
         if installer_script:
