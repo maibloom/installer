@@ -24,6 +24,15 @@ def check_network_manager_blocking() -> bool:
         except subprocess.CalledProcessError:
             return False
 
+def is_connected_blocking() -> bool:
+    """Return True if network connectivity is already established."""
+    try:
+        # 'nmcli networking connectivity' returns "full" when connected.
+        output = subprocess.check_output(['nmcli', 'networking', 'connectivity']).decode().strip()
+        return output.lower() == 'full'
+    except Exception:
+        return False
+
 def list_networks_blocking() -> str:
     """Return the output of available wireless networks."""
     try:
@@ -60,8 +69,12 @@ def run_installer_blocking(installer_script: str):
 class WelcomeScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        # Embed Rich markup directly in the string
-        yield Static("[bold magenta]Welcome to the Mai Bloom OS Installer[/bold magenta]", id="welcome")
+        # Use orange for "Welcome" and purple for the rest
+        welcome_text = (
+            "[bold orange1]Welcome[/bold orange1] to the [bold purple]Mai Bloom OS Installer[/bold purple]\n"
+            "An easy and guided installation experience."
+        )
+        yield Static(welcome_text, id="welcome")
         yield Button("Start", id="start")
         yield Footer()
 
@@ -72,19 +85,28 @@ class WelcomeScreen(Screen):
 class NetworkScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Static("[bold cyan]Network Configuration[/bold cyan]")
-        # Placeholder for network listing
+        yield Static("[bold purple]Network Configuration[/bold purple]")
+        # Placeholder widget for network listing
         yield Static("", id="networks")
         self.ssid_input = Input(placeholder="Enter SSID", id="ssid")
         self.password_input = Input(placeholder="Enter Password", password=True, id="password")
         yield self.ssid_input
         yield self.password_input
+        # Add two buttons: one to “Connect” and one to “Skip”
         yield Button("Connect", id="connect")
+        yield Button("Skip (Already Connected)", id="skip")
         self.message_area = Static("", id="net_message")
         yield self.message_area
         yield Footer()
 
     async def on_mount(self, event: events.Mount) -> None:
+        # If already connected, skip configuration.
+        if await asyncio.to_thread(is_connected_blocking):
+            self.message_area.update("[bold green]Network is already connected. Skipping network configuration...[/bold green]")
+            await asyncio.sleep(2)
+            await self.app.push_screen(CloneScreen())
+            return
+
         nm_ok = await asyncio.to_thread(check_network_manager_blocking)
         if not nm_ok:
             self.message_area.update("[bold red]NetworkManager could not be started. Please check your system.[/bold red]")
@@ -110,11 +132,15 @@ class NetworkScreen(Screen):
                 await self.app.push_screen(CloneScreen())
             else:
                 self.message_area.update("[bold red]Failed to connect. Please recheck your credentials.[/bold red]")
+        elif event.button.id == "skip":
+            self.message_area.update("[bold green]Skipping network configuration...[/bold green]")
+            await asyncio.sleep(1)
+            await self.app.push_screen(CloneScreen())
 
 class CloneScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Static("[bold cyan]Cloning the Mai Bloom Installer Repository[/bold cyan]")
+        yield Static("[bold purple]Cloning the Mai Bloom Installer Repository[/bold purple]")
         self.progress_area = Static("Starting clone...", id="progress")
         yield self.progress_area
         yield Footer()
@@ -139,7 +165,7 @@ class CloneScreen(Screen):
 class LaunchScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Static("[bold cyan]Launching the Mai Bloom Installation Wizard[/bold cyan]")
+        yield Static("[bold purple]Launching the Mai Bloom Installation Wizard[/bold purple]")
         self.message_area = Static("Please wait...", id="launch_msg")
         yield self.message_area
         yield Footer()
@@ -158,7 +184,16 @@ class LaunchScreen(Screen):
 
 class MaiBloomInstallerApp(App):
     temp_dir: str = ""
-    
+    CSS = """
+    Screen {
+        background: #800080;  /* Purple background */
+    }
+    Header, Footer {
+        background: #FFA500;  /* Orange for header/footer */
+        color: black;
+    }
+    """
+
     async def on_exit(self) -> None:
         installer_script = self.exit_result
         if installer_script:
