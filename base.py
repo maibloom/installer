@@ -1,120 +1,209 @@
 #!/usr/bin/env python3
+import asyncio
 import subprocess
 import os
 import sys
 import tempfile
-from rich.console import Console
-from rich.prompt import Prompt
-from rich.panel import Panel
-from rich.progress import track
-from rich.traceback import install
 
-# Install rich traceback for detailed error messages
-install()
+from textual.app import App, ComposeResult
+from textual.containers import Container, Vertical
+from textual.screen import Screen
+from textual.widgets import Header, Footer, Button, Static, Input
+from textual.reactive import reactive
+from textual import events
 
-console = Console()
-
-
-# ------------------------ Network Manager Pre-Check ------------------------
-def check_network_manager():
-    """
-    Check whether NetworkManager is active.
-    If it is not, attempt to start it.
-    """
+# ------------------------ Helper Blocking Functions ------------------------
+def check_network_manager_blocking() -> bool:
+    """Check NetworkManager status and try to start it if not running."""
     try:
-        # Check service status; returns 0 if active.
         subprocess.check_call(['systemctl', 'is-active', '--quiet', 'NetworkManager'])
-        console.print("[bold green]NetworkManager is active.[/bold green]")
+        return True
     except subprocess.CalledProcessError:
-        console.print("[bold yellow]NetworkManager is not active. Attempting to start it...[/bold yellow]")
         try:
             subprocess.check_call(['sudo', 'systemctl', 'start', 'NetworkManager'])
-            console.print("[bold green]NetworkManager started successfully.[/bold green]")
-        except subprocess.CalledProcessError as e:
-            console.print(f"[bold red]Failed to start NetworkManager: {e}[/bold red]")
-            sys.exit(1)
+            return True
+        except subprocess.CalledProcessError:
+            return False
 
-
-# ------------------------ Internet Connection Functions ------------------------
-def list_networks():
+def list_networks_blocking() -> str:
+    """Return the output of available wireless networks."""
     try:
         output = subprocess.check_output(['nmcli', 'device', 'wifi', 'list']).decode('utf-8')
-        console.print(Panel.fit(output, title="Available Networks", border_style="blue"))
+        return output
     except Exception as e:
-        console.print(f"[bold red]Error listing networks: {e}[/bold red]")
+        return f"Error listing networks: {e}"
 
-
-def connect_to_network(ssid, password):
+def connect_to_network_blocking(ssid:str, password:str) -> bool:
+    """Attempt to connect to a wireless network with provided credentials."""
     try:
         result = subprocess.run(
             ['nmcli', 'device', 'wifi', 'connect', ssid, 'password', password],
             capture_output=True, text=True
         )
-        if result.returncode == 0:
-            console.print(f"[bold green]Successfully connected to '{ssid}'![/bold green]")
-            return True
-        else:
-            console.print(f"[bold red]Failed to connect to '{ssid}'. Error: {result.stderr}[/bold red]")
-            return False
-    except Exception as e:
-        console.print(f"[bold red]Error connecting to network: {e}[/bold red]")
+        return result.returncode == 0
+    except Exception:
         return False
 
-
-# ------------------------ Installer Download and Execution ------------------------
-def clone_installer_repo(repo_url, destination):
+def clone_installer_repo_blocking(repo_url: str, destination: str) -> bool:
+    """Clone the Git repo to a destination folder."""
     try:
-        console.print("\n[bold blue]Cloning the Mai Bloom installer repository...[/bold blue]")
-        
-        # Simulate progress for a more engaging experience
-        for _ in track(range(10), description="Preparing clone..."):
-            pass
-        
         subprocess.check_call(['git', 'clone', repo_url, destination])
-        console.print("[bold green]Clone completed successfully.[/bold green]\n")
         return True
-    except subprocess.CalledProcessError as e:
-        console.print(f"[bold red]Error cloning the installer repository: {e}[/bold red]")
+    except subprocess.CalledProcessError:
         return False
 
-
-def run_installer(installer_script):
-    try:
-        console.print("[bold blue]Launching the Mai Bloom installation wizard...[/bold blue]")
-        subprocess.check_call(['python3', installer_script])
-    except subprocess.CalledProcessError as e:
-        console.print(f"[bold red]Error while running the main installer: {e}[/bold red]")
-        sys.exit(1)
+def run_installer_blocking(installer_script: str):
+    """Launch the main installer by running the script."""
+    subprocess.check_call(['python3', installer_script])
 
 
-# ------------------------ Main Entrypoint ------------------------
-def main():
-    console.print(
-        Panel.fit("Welcome to the Mai Bloom OS Installer", title="Mai Bloom OS", border_style="magenta")
-    )
-    
-    # Pre-enable and check NetworkManager
-    check_network_manager()
-    
-    # Configure Internet Connection
-    list_networks()
-    ssid = Prompt.ask("Enter the SSID of the network you wish to connect to")
-    password = Prompt.ask("Enter the network password", password=True)
-    
-    if not connect_to_network(ssid, password):
-        console.print("[bold red]Network connection failed. Exiting installer.[/bold red]")
-        sys.exit(1)
-    
-    # Download Mai Bloom Installer
-    repo_url = "https://github.com/maibloom/installer"
-    temp_dir = tempfile.mkdtemp(prefix="maibloom_installer_")
-    if clone_installer_repo(repo_url, temp_dir):
-        # Assume the main entry point is "main_installer.py"
-        installer_script = os.path.join(temp_dir, 'main_installer.py')
-        run_installer(installer_script)
-    else:
-        sys.exit(1)
+# ------------------------ Textual Screens ------------------------
+class WelcomeScreen(Screen):
+    """A welcome screen with a Start button."""
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield Static("Welcome to the Mai Bloom OS Installer", id="welcome", style="bold magenta", expand=True)
+        yield Button("Start", id="start")
+        yield Footer()
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "start":
+            await self.app.push_screen(NetworkScreen())
+
+
+class NetworkScreen(Screen):
+    """Screen to check network services, list networks, and collect connection details."""
+    ssid_input: Input
+    password_input: Input
+    message_area: Static
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield Static("Network Configuration", style="bold cyan", expand=False)
+        # An area to display the available networks
+        yield Static(id="networks", expand=True)
+        # Input field for SSID and password
+        self.ssid_input = Input(placeholder="Enter SSID", id="ssid")
+        self.password_input = Input(placeholder="Enter Password", password=True, id="password")
+        yield self.ssid_input
+        yield self.password_input
+        yield Button("Connect", id="connect")
+        self.message_area = Static("", id="net_message")
+        yield self.message_area
+        yield Footer()
+
+    async def on_mount(self, event: events.Mount) -> None:
+        # Check NetworkManager status asynchronously
+        nm_ok = await asyncio.to_thread(check_network_manager_blocking)
+        if not nm_ok:
+            self.message_area.update("[bold red]NetworkManager could not be started. Please check your system.[/bold red]")
+            return
+
+        # Display the available networks
+        networks_output = await asyncio.to_thread(list_networks_blocking)
+        net_widget = self.query_one("#networks", Static)
+        net_widget.update(f"[bold green]Available Networks:[/bold green]\n{networks_output}")
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "connect":
+            ssid = self.ssid_input.value.strip()
+            password = self.password_input.value.strip()
+            if not ssid or not password:
+                self.message_area.update("[bold red]SSID and password cannot be empty.[/bold red]")
+                return
+
+            self.message_area.update("Connecting...")
+            connected = await asyncio.to_thread(connect_to_network_blocking, ssid, password)
+            if connected:
+                self.message_area.update("[bold green]Connected successfully![/bold green]")
+                # Proceed to the cloning screen after a short delay
+                await asyncio.sleep(2)
+                await self.app.push_screen(CloneScreen())
+            else:
+                self.message_area.update("[bold red]Failed to connect. Please recheck your credentials.[/bold red]")
+
+
+class CloneScreen(Screen):
+    """Screen to clone the installer repository with simulated progress."""
+    progress_area: Static
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield Static("Cloning the Mai Bloom Installer Repository", style="bold cyan")
+        self.progress_area = Static("Starting clone...", id="progress")
+        yield self.progress_area
+        yield Footer()
+
+    async def on_mount(self, event: events.Mount) -> None:
+        # Create a temporary directory
+        self.temp_dir = tempfile.mkdtemp(prefix="maibloom_installer_")
+        repo_url = "https://github.com/maibloom/installer"
+
+        # Simulate progress
+        for percent in range(0, 101, 20):
+            self.progress_area.update(f"Cloning... {percent}%")
+            await asyncio.sleep(0.5)
+
+        # Now perform the actual clone
+        cloned = await asyncio.to_thread(clone_installer_repo_blocking, repo_url, self.temp_dir)
+        if cloned:
+            self.progress_area.update("[bold green]Clone completed successfully.[/bold green]")
+            # Save the temp_dir in the app state for the next screen.
+            self.app.temp_dir = self.temp_dir
+            await asyncio.sleep(1)
+            await self.app.push_screen(LaunchScreen())
+        else:
+            self.progress_area.update("[bold red]Error cloning the installer repository.[/bold red]")
+
+
+class LaunchScreen(Screen):
+    """Screen to launch the installer."""
+    message_area: Static
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield Static("Launching the Mai Bloom Installation Wizard", style="bold cyan", expand=False)
+        self.message_area = Static("Please wait...", id="launch_msg")
+        yield self.message_area
+        yield Footer()
+
+    async def on_mount(self, event: events.Mount) -> None:
+        # Build the installer script path.
+        temp_dir = getattr(self.app, "temp_dir", None)
+        if not temp_dir:
+            self.message_area.update("[bold red]Temporary installer directory not found.[/bold red]")
+            return
+        installer_script = os.path.join(temp_dir, "main_installer.py")
+        self.message_area.update("Launching installer...")
+        await asyncio.sleep(1)
+        # Exit the TUI and run the installer externally.
+        self.app.exit(result=installer_script)
+
+
+# ------------------------ Main Textual App ------------------------
+class MaiBloomInstallerApp(App):
+    CSS_PATH = None  # You may use CSS to further style your widgets if desired.
+    temp_dir: str = reactive("")
+
+    async def on_exit(self) -> None:
+        # If the app is exiting and we have an installer script, launch it.
+        installer_script = self.exit_result
+        if installer_script:
+            try:
+                subprocess.check_call(['python3', installer_script])
+            except subprocess.CalledProcessError as e:
+                print(f"Error while launching installer: {e}")
+                sys.exit(1)
+
+    def on_key(self, event: events.Key) -> None:
+        # Optional: allow "q" to quit at any time.
+        if event.key == "q":
+            self.exit()
+
+    def compose(self) -> ComposeResult:
+        yield WelcomeScreen()
 
 
 if __name__ == "__main__":
-    main()
+    # Launch the full-screen TUI app.
+    MaiBloomInstallerApp().run(title="Mai Bloom OS Installer")
