@@ -80,9 +80,9 @@ class WizardApp:
         welcome_text = urwid.Text([
             ('welcome', "Welcome "),
             ("", "to the "),
-            ('title', "Mai Bloom Operating System Installer\n"),
-            "Press 'Enter' to start!"
-            ], align="center")
+            ('title', "Mai Bloom OS Installer\n"),
+            "A guided, simple install experience."
+        ], align="center")
         start_btn = urwid.Button("Start", on_press=self.on_welcome_start)
         btn_map = urwid.AttrMap(start_btn, 'button')
         pile = urwid.Pile([welcome_text, urwid.Divider(), btn_map])
@@ -90,7 +90,14 @@ class WizardApp:
         self.placeholder.original_widget = fill
 
     def on_welcome_start(self, button):
-        self.show_network_screen()
+        # First check if network is connected.
+        if is_connected():
+            self.placeholder.original_widget = urwid.Filler(
+                urwid.Text(('success', "Network is already connected; skipping network configuration..."), align="center")
+            )
+            self.loop.set_alarm_in(1, lambda loop, user_data: self.show_clone_screen())
+        else:
+            self.show_network_screen()
 
     def show_network_screen(self):
         header = urwid.Text("Network Configuration", align="center")
@@ -102,9 +109,9 @@ class WizardApp:
         connect_btn = urwid.Button("Connect", on_press=self.on_connect)
         skip_btn = urwid.Button("Skip (Already Connected)", on_press=self.on_skip)
         btns = urwid.Columns([
-                    urwid.AttrMap(connect_btn, 'button'),
-                    urwid.AttrMap(skip_btn, 'button')
-                ])
+            urwid.AttrMap(connect_btn, 'button'),
+            urwid.AttrMap(skip_btn, 'button')
+        ])
         pile = urwid.Pile([
             header, urwid.Divider(),
             nets_text, urwid.Divider(),
@@ -114,15 +121,6 @@ class WizardApp:
         ])
         fill = urwid.Filler(pile, valign="top")
         self.placeholder.original_widget = fill
-
-        # Auto-skip if already connected:
-        if is_connected():
-            self.msg_text.set_text(('success', "Already connected. Skipping network configuration..."))
-            self.loop.set_alarm_in(1, lambda loop, user_data: self.show_clone_screen())
-            return
-
-        if not check_network_manager():
-            self.msg_text.set_text(('error', "NetworkManager could not be started."))
 
     def on_connect(self, button):
         ssid = self.ssid_edit.edit_text.strip()
@@ -142,6 +140,16 @@ class WizardApp:
         self.loop.set_alarm_in(1, lambda loop, user_data: self.show_clone_screen())
 
     def show_clone_screen(self):
+        # Inform the user about the download source.
+        info_text = urwid.Text(
+            "Downloading the main installer from:\nhttps://github.com/maibloom/installer\nPlease wait...",
+            align="center"
+        )
+        self.placeholder.original_widget = urwid.Filler(info_text, valign="middle")
+        # After a two-second pause, begin the clone process.
+        self.loop.set_alarm_in(2, lambda loop, user_data: self.start_cloning())
+
+    def start_cloning(self):
         header = urwid.Text("Cloning the Installer Repository", align="center")
         self.progress_text = urwid.Text("Starting clone...")
         pile = urwid.Pile([header, urwid.Divider(), self.progress_text])
@@ -164,7 +172,6 @@ class WizardApp:
 
     def launch_installer(self):
         installer_script = os.path.join(self.temp_dir, "main_installer.py")
-        # Display final message before exiting:
         final_text = urwid.Text("Launching installer...", align="center")
         self.placeholder.original_widget = urwid.Filler(final_text, valign="middle")
         try:
