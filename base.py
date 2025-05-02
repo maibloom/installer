@@ -80,8 +80,8 @@ class WizardApp:
         welcome_text = urwid.Text([
             ('welcome', "Welcome "),
             ("", "to the "),
-            ('title', "Mai Bloom OS Installer\n"),
-            "A guided, simple install experience."
+            ('title', "Mai Bloom Operating System Installer\n"),
+            "Press 'Enter' to start!"
             ], align="center")
         start_btn = urwid.Button("Start", on_press=self.on_welcome_start)
         btn_map = urwid.AttrMap(start_btn, 'button')
