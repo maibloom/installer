@@ -13,14 +13,17 @@ def get_available_disks():
     Note: There is no fallback here. If the command fails or no disks are found,
     this function returns an empty list (or raises an error if lsblk fails).
     """
-    result = subprocess.run(
-        ["lsblk", "-d", "-n", "-o", "NAME"],
-        capture_output=True,
-        text=True,
-        check=True
-    )
-    disks = ["/dev/" + disk.strip() for disk in result.stdout.splitlines() if disk.strip() != '']
-    return disks
+    try:
+        result = subprocess.run(
+            ["lsblk", "-d", "-n", "-o", "NAME"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        disks = ["/dev/" + disk.strip() for disk in result.stdout.splitlines() if disk.strip() != '']
+        return disks
+    except subprocess.CalledProcessError:
+        return []
 
 def custom_partitioning(disk):
     """
@@ -103,7 +106,7 @@ class InstallerApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static("Welcome to the Beautiful Arch Linux Installer", classes="title")
-        
+
         # Section: Installation Details
         with Vertical():
             yield Input(placeholder="Hostname", id="hostname", value="archlinux")
@@ -111,14 +114,11 @@ class InstallerApp(App):
             yield Input(placeholder="Timezone (e.g., America/New_York)", id="timezone", value="America/New_York")
             yield Input(placeholder="Username", id="username", value="yourusername")
             yield Input(placeholder="Password", id="password", password=True)
-        
+
         # Section: Disk Selection
         yield Static("Select Disk:", classes="label")
         self.disk_container = Horizontal(id="disk-container")
-        try:
-            disks = get_available_disks()
-        except Exception as error:
-            disks = []  # In case lsblk fails, return an empty list.
+        disks = get_available_disks()
         self.disk_buttons = []
         if disks:
             # Do not force a default selection; let the user choose.
@@ -129,7 +129,7 @@ class InstallerApp(App):
         else:
             self.disk_container.mount(Static("No disks found. Please attach a disk.", classes="error"))
         yield self.disk_container
-        
+
         # Section: Application Category Selection
         yield Static("Select Application Categories:", classes="label")
         self.category_container = Horizontal(id="category-container")
@@ -139,13 +139,13 @@ class InstallerApp(App):
             self.app_categories.append(cb)
             self.category_container.mount(cb)
         yield self.category_container
-        
+
         # Preinstall Notice
         yield Static(
             "Note: In addition to your selections, extra applications (e.g., app stores) will be preinstalled.",
             classes="info"
         )
-        
+
         # Install Button and Status Display
         yield Button("Install", id="install-btn")
         self.status_display = Static("", id="status")
@@ -160,14 +160,14 @@ class InstallerApp(App):
                 return
             self.status_display.update("Starting installation...")
             self.perform_installation(config)
-    
+
     def build_config(self):
         hostname = self.query_one("#hostname", Input).value.strip() or "archlinux"
         locale = self.query_one("#locale", Input).value.strip() or "en_US.UTF-8"
         timezone = self.query_one("#timezone", Input).value.strip() or "America/New_York"
         username = self.query_one("#username", Input).value.strip() or "yourusername"
         password = self.query_one("#password", Input).value.strip() or "yourpassword"
-        
+
         # Determine the selected disk.
         selected_disk = None
         for rb in self.disk_buttons:
@@ -177,10 +177,10 @@ class InstallerApp(App):
         if not selected_disk:
             self.status_display.update("[error]Error: You must select a disk before installing.[/error]")
             return None
-        
+
         # Gather selected application categories.
         selected_categories = [cb.label for cb in self.app_categories if cb.value]
-        
+
         return {
             "hostname": hostname,
             "locale": locale,
