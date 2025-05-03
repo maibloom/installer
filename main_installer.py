@@ -51,8 +51,50 @@ def custom_partitioning(disk):
 # ------------------------ Main Textual App ------------------------
 
 class InstallerApp(App):
-    CSS_PATH = None
-
+    # Inline CSS to create a stylish, sleek look.
+    CSS = """
+Screen {
+    background: #1e1e2e;
+    color: #f8f8f2;
+    padding: 1 2;
+}
+Header {
+    background: #282a36;
+    color: #f8f8f2;
+}
+#welcome {
+    text-align: center;
+    padding: 2;
+    color: #ff79c6;
+    border: heavy #6272a4;
+    margin: 1;
+}
+Input {
+    border: round #6272a4;
+    margin: 1;
+    padding: 1;
+}
+Button {
+    background: #50fa7b;
+    color: #282a36;
+    border: round #6272a4;
+    margin: 1;
+    padding: 1;
+    text-style: bold;
+}
+#status_text {
+    background: #ffb86c;
+    color: #282a36;
+    padding: 1;
+    margin: 1;
+    border: round #6272a4;
+}
+Footer {
+    background: #282a36;
+    color: #f8f8f2;
+}
+    """
+    
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static("Welcome to the Arch Linux Installer", id="welcome")
@@ -65,11 +107,7 @@ class InstallerApp(App):
         # Disk selection input.
         yield Input(placeholder="Disk (e.g., /dev/sda)", id="disk", value=get_default_disk())
         # Application categories as a comma-separated list.
-        yield Input(
-            placeholder="App Categories (comma separated, e.g., Education,Programming)",
-            id="app_categories",
-            value=""
-        )
+        yield Input(placeholder="App Categories (comma separated)", id="app_categories", value="")
         # Install button.
         yield Button("Install", id="install_button")
         # Status area.
@@ -86,10 +124,11 @@ class InstallerApp(App):
             timezone = self.query_one("#timezone", Input).value.strip() or "America/New_York"
             username = self.query_one("#username", Input).value.strip() or "yourusername"
             password = self.query_one("#password", Input).value.strip() or "yourpassword"
-            disk     = self.query_one("#disk", Input).value.strip() or "/dev/sda"
+            disk     = self.query_one("#disk", Input).value.strip() or get_default_disk()
             app_categories_str = self.query_one("#app_categories", Input).value.strip()
-            categories = [item.strip() for item in app_categories_str.split(",") if item.strip()] if app_categories_str else []
-
+            categories = [item.strip() for item in app_categories_str.split(",") if item.strip()] \
+                         if app_categories_str else []
+            
             # Build the installer configuration.
             config = {
                 "hostname": hostname,
@@ -103,6 +142,7 @@ class InstallerApp(App):
                 "disk_config": custom_partitioning(disk),
                 "app_categories": categories
             }
+            
             status_message = (
                 "Starting installation with the following settings:\n"
                 f"Hostname: {hostname}\n"
@@ -111,12 +151,14 @@ class InstallerApp(App):
                 f"Username: {username}\n"
                 f"Disk: {disk}\n"
                 f"App Categories: {', '.join(categories) if categories else 'None'}\n"
-                "Note: Additional applications will be preinstalled."
+                "Note: Extra applications will be preinstalled."
             )
+            
             self.status_text.update(status_message)
             await self.run_installation(config)
 
     async def run_installation(self, config: dict) -> None:
+        # Update status and run the installation in a background thread.
         self.status_text.update("[bold magenta]Installation in progress...[/bold magenta]")
         try:
             installer = archinstall.Installer()
