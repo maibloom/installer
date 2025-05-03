@@ -10,21 +10,17 @@ def get_available_disks():
     """
     Retrieve a list of available disk devices using lsblk.
     Returns a list of disk names prefixed with '/dev/'.
+    Note: There is no fallback here. If the command fails or no disks are found,
+    this function returns an empty list (or raises an error if lsblk fails).
     """
-    try:
-        result = subprocess.run(
-            ["lsblk", "-d", "-n", "-o", "NAME"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        disks = ["/dev/" + disk.strip() for disk in result.stdout.splitlines() if disk.strip() != '']
-        if not disks:
-            raise Exception("No disks found.")
-        return disks
-    except Exception as e:
-        # Fallback to a default if listing disks fails.
-        return ["/dev/sda"]
+    result = subprocess.run(
+        ["lsblk", "-d", "-n", "-o", "NAME"],
+        capture_output=True,
+        text=True,
+        check=True
+    )
+    disks = ["/dev/" + disk.strip() for disk in result.stdout.splitlines() if disk.strip() != '']
+    return disks
 
 def custom_partitioning(disk):
     """
@@ -72,7 +68,7 @@ class InstallerApp(App):
     }
     .info {
         color: #ff00ff;
-        italic: true;
+        text-style: italic;
         padding: 1;
     }
     Button {
@@ -108,6 +104,7 @@ class InstallerApp(App):
         yield Header(show_clock=True)
         yield Static("Welcome to the Beautiful Arch Linux Installer", classes="title")
         
+        # Section: Installation Details
         with Vertical():
             yield Input(placeholder="Hostname", id="hostname", value="archlinux")
             yield Input(placeholder="Locale (e.g., en_US.UTF-8)", id="locale", value="en_US.UTF-8")
@@ -115,19 +112,25 @@ class InstallerApp(App):
             yield Input(placeholder="Username", id="username", value="yourusername")
             yield Input(placeholder="Password", id="password", password=True)
         
+        # Section: Disk Selection
         yield Static("Select Disk:", classes="label")
         self.disk_container = Horizontal(id="disk-container")
-        disks = get_available_disks()
+        try:
+            disks = get_available_disks()
+        except Exception as error:
+            disks = []  # In case lsblk fails, return an empty list.
         self.disk_buttons = []
-        for disk in disks:
-            rb = RadioButton(disk, id=f"disk-{disk}")
-            # Set the first option as selected by default.
-            if not self.disk_buttons:
-                rb.value = True
-            self.disk_buttons.append(rb)
-            self.disk_container.mount(rb)
+        if disks:
+            # Do not force a default selection; let the user choose.
+            for disk in disks:
+                rb = RadioButton(disk, id=f"disk-{disk}")
+                self.disk_buttons.append(rb)
+                self.disk_container.mount(rb)
+        else:
+            self.disk_container.mount(Static("No disks found. Please attach a disk.", classes="error"))
         yield self.disk_container
         
+        # Section: Application Category Selection
         yield Static("Select Application Categories:", classes="label")
         self.category_container = Horizontal(id="category-container")
         self.app_categories = []
@@ -137,11 +140,13 @@ class InstallerApp(App):
             self.category_container.mount(cb)
         yield self.category_container
         
+        # Preinstall Notice
         yield Static(
             "Note: In addition to your selections, extra applications (e.g., app stores) will be preinstalled.",
             classes="info"
         )
         
+        # Install Button and Status Display
         yield Button("Install", id="install-btn")
         self.status_display = Static("", id="status")
         yield self.status_display
@@ -150,6 +155,9 @@ class InstallerApp(App):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "install-btn":
             config = self.build_config()
+            if config is None:
+                # build_config already set an error, so do not proceed
+                return
             self.status_display.update("Starting installation...")
             self.perform_installation(config)
     
@@ -167,7 +175,8 @@ class InstallerApp(App):
                 selected_disk = rb.label
                 break
         if not selected_disk:
-            selected_disk = "/dev/sda"
+            self.status_display.update("[error]Error: You must select a disk before installing.[/error]")
+            return None
         
         # Gather selected application categories.
         selected_categories = [cb.label for cb in self.app_categories if cb.value]
@@ -189,7 +198,7 @@ class InstallerApp(App):
         success, message = run_installation(config)
         self.status_display.update(message)
         if not success:
-            # Here you might want to add logic for retry or error details.
+            # Additional error handling could be added here.
             pass
 
 if __name__ == "__main__":
