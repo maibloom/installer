@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-import urwid
 import subprocess
 import os
 import sys
 import tempfile
+
+from textual.app import App, ComposeResult
+from textual.screen import Screen
+from textual.widgets import Header, Footer, Button, Static, Input
+from textual.reactive import reactive
 
 # ------------------------ Helper Functions ------------------------
 
@@ -33,8 +37,10 @@ def list_networks():
 
 def connect_to_network(ssid, password):
     try:
-        res = subprocess.run(['nmcli', 'device', 'wifi', 'connect', ssid, 'password', password],
-                             capture_output=True, text=True)
+        res = subprocess.run(
+            ['nmcli', 'device', 'wifi', 'connect', ssid, 'password', password],
+            capture_output=True, text=True
+        )
         return res.returncode == 0
     except Exception:
         return False
@@ -49,137 +55,139 @@ def clone_repo(repo_url, destination):
 def run_installer(script_path):
     subprocess.check_call(['python3', script_path])
 
-# ------------------------ Wizard Application ------------------------
 
-class WizardApp:
-    def __init__(self):
-        self.placeholder = urwid.WidgetPlaceholder(urwid.SolidFill())
-        self.temp_dir = None
-        self.loop = None
+# ------------------------ Screen Classes ------------------------
 
-    def main(self):
-        self.show_welcome_screen()
-        palette = [
-            ('welcome', 'light red', ''),
-            ('title', 'light magenta', ''),
-            ('button', 'black', 'dark cyan'),
-            ('error', 'light red', ''),
-            ('success', 'light green', ''),
-            ('bg', 'white', 'dark magenta'),
-        ]
-        self.loop = urwid.MainLoop(self.placeholder, palette, unhandled_input=self.unhandled_input)
-        self.loop.run()
+class MessageScreen(Screen):
+    """A simple screen to display a transient message."""
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self.message = message
 
-    def unhandled_input(self, key):
-        if key in ('q', 'Q'):
-            raise urwid.ExitMainLoop()
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static(self.message, id="message")
+        yield Footer()
 
-    # ------------------------ Screens ------------------------
 
-    def show_welcome_screen(self):
-        welcome_text = urwid.Text([
-            ('welcome', "Welcome "),
-            ("", "to the "),
-            ('title', "Mai Bloom OS Installer\n"),
-            "A guided, simple install experience."
-        ], align="center")
-        start_btn = urwid.Button("Start", on_press=self.on_welcome_start)
-        btn_map = urwid.AttrMap(start_btn, 'button')
-        pile = urwid.Pile([welcome_text, urwid.Divider(), btn_map])
-        fill = urwid.Filler(pile, valign="middle")
-        self.placeholder.original_widget = fill
+class WelcomeScreen(Screen):
+    """The welcome screen invites the user to begin the install process."""
+    def compose(self) -> ComposeResult:
+        yield Header()
+        welcome_text = (
+            "[bold magenta]Welcome[/bold magenta] to the [bold cyan]Mai Bloom OS Installer[/bold cyan]\n"
+            "From Users, For Users"
+        )
+        yield Static(welcome_text, id="welcome_text")
+        yield Button("Start", id="start_button")
+        yield Footer()
 
-    def on_welcome_start(self, button):
-        # First check if network is connected.
-        if is_connected():
-            self.placeholder.original_widget = urwid.Filler(
-                urwid.Text(('success', "Network is already connected; skipping network configuration..."), align="center")
-            )
-            self.loop.set_alarm_in(1, lambda loop, user_data: self.show_clone_screen())
-        else:
-            self.show_network_screen()
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "start_button":
+            # Signal the app to continue the wizard.
+            self.app.handle_welcome_start()
 
-    def show_network_screen(self):
-        header = urwid.Text("Network Configuration", align="center")
-        nets = list_networks()
-        nets_text = urwid.Text("Available Networks:\n" + nets)
-        self.ssid_edit = urwid.Edit("SSID: ")
-        self.password_edit = urwid.Edit("Password: ", mask="*")
-        self.msg_text = urwid.Text("")
-        connect_btn = urwid.Button("Connect", on_press=self.on_connect)
-        skip_btn = urwid.Button("Skip (Already Connected)", on_press=self.on_skip)
-        btns = urwid.Columns([
-            urwid.AttrMap(connect_btn, 'button'),
-            urwid.AttrMap(skip_btn, 'button')
-        ])
-        pile = urwid.Pile([
-            header, urwid.Divider(),
-            nets_text, urwid.Divider(),
-            self.ssid_edit, self.password_edit, urwid.Divider(),
-            btns, urwid.Divider(),
-            self.msg_text
-        ])
-        fill = urwid.Filler(pile, valign="top")
-        self.placeholder.original_widget = fill
 
-    def on_connect(self, button):
-        ssid = self.ssid_edit.edit_text.strip()
-        password = self.password_edit.edit_text.strip()
-        if not ssid or not password:
-            self.msg_text.set_text(('error', "Please enter both SSID and password."))
+class NetworkScreen(Screen):
+    """Screen to configure network connection."""
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static("Network Configuration", id="network_header")
+        networks = list_networks()
+        yield Static(f"Available Networks:\n{networks}", id="networks_text")
+        yield Input(placeholder="SSID", id="ssid_input")
+        yield Input(password=True, placeholder="Password", id="password_input")
+        yield Button("Connect", id="connect_button")
+        yield Button("Skip (Already Connected)", id="skip_button")
+        yield Static("", id="network_message")
+        yield Footer()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        message_widget = self.query_one("#network_message", Static)
+        if event.button.id == "connect_button":
+            ssid = self.query_one("#ssid_input", Input).value.strip()
+            password = self.query_one("#password_input", Input).value.strip()
+            if not ssid or not password:
+                message_widget.update("[red]Please enter both SSID and password.[/red]")
+                return
+            message_widget.update("Connecting...")
+            if connect_to_network(ssid, password):
+                message_widget.update("[green]Connected successfully![/green]")
+                self.app.set_timer(1, self.app.show_clone_screen)
+            else:
+                message_widget.update("[red]Failed to connect. Check credentials.[/red]")
+        elif event.button.id == "skip_button":
+            message_widget.update("[green]Skipping network configuration...[/green]")
+            self.app.set_timer(1, self.app.show_clone_screen)
+
+
+class CloneScreen(Screen):
+    """Screen to simulate cloning the installer repository."""
+    progress: reactive[int] = reactive(0)
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static("Cloning the Installer Repository", id="clone_header")
+        yield Static("Starting clone...", id="clone_status")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        # Create a temporary directory and store it in the app for later use.
+        self.temp_dir = tempfile.mkdtemp(prefix="maibloom_")
+        self.app.temp_dir = self.temp_dir
+        self.repo_url = "https://github.com/maibloom/installer"
+        self.progress = 0
+        self.refresh_progress()
+
+    def refresh_progress(self):
+        clone_status = self.query_one("#clone_status", Static)
+        if self.progress > 100:
+            if clone_repo(self.repo_url, self.temp_dir):
+                clone_status.update("[green]Clone complete. Launching installer...[/green]")
+                self.app.set_timer(1, self.app.launch_installer)
+            else:
+                clone_status.update("[red]Clone failed.[/red]")
             return
-        self.msg_text.set_text("Connecting...")
-        if connect_to_network(ssid, password):
-            self.msg_text.set_text(('success', "Connected successfully!"))
-            self.loop.set_alarm_in(1, lambda loop, user_data: self.show_clone_screen())
-        else:
-            self.msg_text.set_text(('error', "Failed to connect. Check credentials."))
+        clone_status.update(f"Cloning... {self.progress}%")
+        self.progress += 25
+        self.app.set_timer(0.5, self.refresh_progress)
 
-    def on_skip(self, button):
-        self.msg_text.set_text(('success', "Skipping network configuration..."))
-        self.loop.set_alarm_in(1, lambda loop, user_data: self.show_clone_screen())
+
+# ------------------------ Main App Class ------------------------
+
+class WizardApp(App):
+    """A Textual-based wizard installer app."""
+    CSS_PATH = None  # Optionally, set a CSS file for styling
+
+    def on_mount(self) -> None:
+        self.temp_dir = None
+        self.push_screen(WelcomeScreen())
+
+    def handle_welcome_start(self):
+        # Decide whether to configure the network or skip based on connectivity.
+        if is_connected():
+            self.push_screen(
+                MessageScreen("Network is already connected; skipping network configuration...")
+            )
+            self.set_timer(1, self.show_clone_screen)
+        else:
+            self.push_screen(NetworkScreen())
 
     def show_clone_screen(self):
-        # Inform the user about the download source.
-        info_text = urwid.Text(
-            "Downloading the main installer from:\nhttps://github.com/maibloom/installer\nPlease wait...",
-            align="center"
-        )
-        self.placeholder.original_widget = urwid.Filler(info_text, valign="middle")
-        # After a two-second pause, begin the clone process.
-        self.loop.set_alarm_in(2, lambda loop, user_data: self.start_cloning())
-
-    def start_cloning(self):
-        header = urwid.Text("Cloning the Installer Repository", align="center")
-        self.progress_text = urwid.Text("Starting clone...")
-        pile = urwid.Pile([header, urwid.Divider(), self.progress_text])
-        fill = urwid.Filler(pile, valign="middle")
-        self.placeholder.original_widget = fill
-        self.temp_dir = tempfile.mkdtemp(prefix="maibloom_")
-        repo_url = "https://github.com/maibloom/installer"
-        self.clone_progress(0, repo_url)
-
-    def clone_progress(self, percent, repo_url):
-        if percent > 100:
-            if clone_repo(repo_url, self.temp_dir):
-                self.progress_text.set_text(('success', "Clone complete. Launching installer..."))
-                self.loop.set_alarm_in(1, lambda loop, user_data: self.launch_installer())
-            else:
-                self.progress_text.set_text(('error', "Clone failed."))
-            return
-        self.progress_text.set_text(f"Cloning... {percent}%")
-        self.loop.set_alarm_in(0.5, lambda loop, user_data: self.clone_progress(percent + 25, repo_url))
+        self.push_screen(CloneScreen())
 
     def launch_installer(self):
-        installer_script = os.path.join(self.temp_dir, "main_installer.py")
-        final_text = urwid.Text("Launching installer...", align="center")
-        self.placeholder.original_widget = urwid.Filler(final_text, valign="middle")
+        installer_script = (
+            os.path.join(self.temp_dir, "main_installer.py") if self.temp_dir else ""
+        )
+        self.push_screen(MessageScreen("Launching installer..."))
         try:
             run_installer(installer_script)
         except subprocess.CalledProcessError as e:
-            print("Error launching installer:", e)
+            print(f"Error launching installer: {e}")
             sys.exit(1)
-        raise urwid.ExitMainLoop()
+        self.exit()
 
-if __name__ == '__main__':
-    WizardApp().main()
+
+if __name__ == "__main__":
+    WizardApp().run()
