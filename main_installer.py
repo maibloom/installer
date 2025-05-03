@@ -48,7 +48,7 @@ password_edit = urwid.Edit("Password: ", mask="*")
 disk_edit = urwid.Edit("Disk (e.g., /dev/sda): ")
 
 # Graphics driver selection using RadioButtons
-driver_radio = urwid.RadioButtonGroup(driver_options)
+driver_radio = urwid.RadioButton(driver_options)
 
 submit_button = urwid.Button("Install", on_press=on_submit)
 response = urwid.Text("")
