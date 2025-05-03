@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Button, Input, Static, Checkbox, RadioButton
-from textual.containers import Vertical, Horizontal
+import urwid
+import archinstall  # Ensure archinstall is installed in your environment
 import subprocess
+import os
 import sys
-import archinstall
+import shutil
+import logging
+
+# Disable all logging output.
+logging.disable(logging.CRITICAL)
 
 def get_available_disks():
     """
     Retrieve a list of available disk devices using lsblk.
     Returns a list of disk names prefixed with '/dev/'.
-    Note: There is no fallback here. If the command fails or no disks are found,
-    this function returns an empty list (or raises an error if lsblk fails).
     """
     try:
         result = subprocess.run(
@@ -21,185 +23,172 @@ def get_available_disks():
             check=True
         )
         disks = ["/dev/" + disk.strip() for disk in result.stdout.splitlines() if disk.strip() != '']
+        if not disks:
+            raise Exception("No disks found.")
         return disks
-    except subprocess.CalledProcessError:
-        return []
+    except Exception as e:
+        # Logging is disabled; you can handle errors here as needed.
+        return ["/dev/sda"]
 
 def custom_partitioning(disk):
     """
-    Create a simple partition scheme for the given disk.
-    Adjust mount points and sizes as necessary.
+    Create a simple partitioning scheme given the selected disk.
+    Adjust partition sizes and mount points as required.
     """
-    return {
+    partition_scheme = {
         "disk": disk,
         "partitions": [
-            {"mountpoint": "/", "size": "20G"},
-            {"mountpoint": "/home", "size": "70%"},
-            {"mountpoint": "swap", "size": "10G"}
+            {"mountpoint": "/", "size": "20G"},    # root partition
+            {"mountpoint": "/home", "size": "70%"},  # 70% for home
+            {"mountpoint": "swap", "size": "10G"}    # swap partition
         ]
     }
+    return partition_scheme
 
 def run_installation(config):
     """
-    Invoke the archinstall process with our configuration.
-    Returns a tuple (success_flag, message).
+    Run the archinstall process with the provided configuration.
+    Updates the status text on the UI with progress messages.
     """
+    global status_text, loop
     try:
         installer = archinstall.Installer()
+        status_text.set_text(('info', "Installation in progress..."))
+        loop.draw_screen()  # Force an update of the screen
+
         installer.install(config)
-        return True, "Installation completed successfully!"
+        status_text.set_text(('success', "Installation completed successfully!"))
     except Exception as e:
-        return False, "Installation failed: " + str(e)
+        status_text.set_text(('error', "Installation failed: " + str(e)))
+        sys.exit(1)
 
-class InstallerApp(App):
-    CSS = """
-    Screen {
-        background: #1d1f21;
-        color: #c5c8c6;
-    }
-    .title {
-        text-align: center;
-        background: #ffcc00;
-        color: #000000;
-        padding: 1 2;
-        border: round #ffff00;
-        margin: 1;
-    }
-    .label {
-        color: #00ff00;
-        padding: 1;
-    }
-    .info {
-        color: #ff00ff;
-        text-style: italic;
-        padding: 1;
-    }
-    Button {
-        background: #005f5f;
-        border: heavy #00ffff;
-        margin: 1;
-    }
-    Button:hover {
-        background: #00ffff;
-        color: black;
-    }
-    Input {
-        border: round #00ff00;
-        padding: 1;
-        margin: 1;
-    }
-    Checkbox {
-        padding: 1;
-        margin: 1;
-    }
-    RadioButton {
-        padding: 1;
-        margin: 1;
-    }
-    Static#status {
-        border: round #ff00ff;
-        padding: 1;
-        margin: 1;
-    }
+def on_install_pressed(button, user_data):
     """
+    Reads input fields, selected disk, and app categories,
+    builds the configuration dictionary, and launches the installation.
+    """
+    config = {}
+    config['hostname'] = hostname_edit.get_edit_text().strip() or "archlinux"
+    config['locale']   = locale_edit.get_edit_text().strip() or "en_US.UTF-8"
+    config['timezone'] = timezone_edit.get_edit_text().strip() or "America/New_York"
+    config['user'] = {
+        'name':     user_edit.get_edit_text().strip() or "yourusername",
+        'password': password_edit.get_edit_text().strip() or "yourpassword",  # Secure handling recommended
+        'sudo': True
+    }
+    
+    # Retrieve the selected disk from radio buttons.
+    selected_disk = None
+    for radio in disk_radio_buttons:
+        if radio.get_state():
+            selected_disk = radio.get_label()
+            break
+    if not selected_disk:
+        selected_disk = "/dev/sda"  # default fallback
+    
+    config['disk_config'] = custom_partitioning(selected_disk)
+    
+    # Gather application category selections.
+    selected_app_categories = [
+        checkbox.get_label() for checkbox in app_category_checkboxes if checkbox.get_state()
+    ]
+    config['app_categories'] = selected_app_categories
 
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        yield Static("Welcome to the Beautiful Arch Linux Installer", classes="title")
+    # Update status with the selected configuration.
+    status_message = (
+        "Starting installation with the following settings:\n"
+        f"Hostname: {config['hostname']}\n"
+        f"Locale: {config['locale']}\n"
+        f"Timezone: {config['timezone']}\n"
+        f"Username: {config['user']['name']}\n"
+        f"Disk: {selected_disk}\n"
+        f"App Categories: {', '.join(selected_app_categories) if selected_app_categories else 'None'}\n\n"
+        "Note: Additional applications (e.g. app stores) will be preinstalled."
+    )
+    status_text.set_text(('info', status_message))
+    loop.draw_screen()
+    run_installation(config)
 
-        # Section: Installation Details
-        with Vertical():
-            yield Input(placeholder="Hostname", id="hostname", value="archlinux")
-            yield Input(placeholder="Locale (e.g., en_US.UTF-8)", id="locale", value="en_US.UTF-8")
-            yield Input(placeholder="Timezone (e.g., America/New_York)", id="timezone", value="America/New_York")
-            yield Input(placeholder="Username", id="username", value="yourusername")
-            yield Input(placeholder="Password", id="password", password=True)
+# -------------------------------
+# UI Setup with Urwid
+# -------------------------------
 
-        # Section: Disk Selection
-        yield Static("Select Disk:", classes="label")
-        self.disk_container = Horizontal(id="disk-container")
-        disks = get_available_disks()
-        self.disk_buttons = []
-        if disks:
-            # Do not force a default selection; let the user choose.
-            for disk in disks:
-                rb = RadioButton(disk, id=f"disk-{disk}")
-                self.disk_buttons.append(rb)
-                self.disk_container.mount(rb)
-        else:
-            self.disk_container.mount(Static("No disks found. Please attach a disk.", classes="error"))
-        yield self.disk_container
+# Define color palette for a more vibrant UI.
+palette = [
+    ('title', 'light green,bold', ''),
+    ('banner', 'yellow,bold', ''),
+    ('edit', 'light cyan', 'dark gray'),
+    ('buttn', 'black', 'light gray'),
+    ('buttnf', 'white,bold', 'dark blue'),
+    ('info', 'light magenta', ''),
+    ('success', 'black', 'dark green'),
+    ('error', 'white,bold', 'dark red'),
+]
 
-        # Section: Application Category Selection
-        yield Static("Select Application Categories:", classes="label")
-        self.category_container = Horizontal(id="category-container")
-        self.app_categories = []
-        for cat in ["Education", "Programming", "Gaming", "Daily Use"]:
-            cb = Checkbox(cat, id=f"cat-{cat}")
-            self.app_categories.append(cb)
-            self.category_container.mount(cb)
-        yield self.category_container
+# Title and input fields with styling.
+welcome_text = urwid.Text(('title', "Welcome to the Arch Linux Installer"), align='center')
+separator = urwid.Divider()
 
-        # Preinstall Notice
-        yield Static(
-            "Note: In addition to your selections, extra applications (e.g., app stores) will be preinstalled.",
-            classes="info"
-        )
+hostname_edit = urwid.AttrWrap(urwid.Edit(("banner", "Hostname: "), "archlinux"), 'edit')
+locale_edit   = urwid.AttrWrap(urwid.Edit(("banner", "Locale (e.g., en_US.UTF-8): "), "en_US.UTF-8"), 'edit')
+timezone_edit = urwid.AttrWrap(urwid.Edit(("banner", "Timezone (e.g., America/New_York): "), "America/New_York"), 'edit')
+user_edit     = urwid.AttrWrap(urwid.Edit(("banner", "Username: "), "yourusername"), 'edit')
+password_edit = urwid.AttrWrap(urwid.Edit(("banner", "Password: "), "", mask="*"), 'edit')
 
-        # Install Button and Status Display
-        yield Button("Install", id="install-btn")
-        self.status_display = Static("", id="status")
-        yield self.status_display
-        yield Footer()
+# Set up disk selection via radio buttons.
+disks = get_available_disks()
+disk_text = urwid.Text(('banner', "Select Disk:"))
+disk_radio_buttons = []
+radio_group = []
+for disk in disks:
+    radio = urwid.RadioButton(radio_group, disk, state=False)
+    disk_radio_buttons.append(radio)
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "install-btn":
-            config = self.build_config()
-            if config is None:
-                # build_config already set an error, so do not proceed
-                return
-            self.status_display.update("Starting installation...")
-            self.perform_installation(config)
+# Create application categories section with checkboxes.
+app_category_text = urwid.Text(('banner', "Select Application Categories (choose any that apply):"))
+app_category_options = ["Education", "Programming", "Gaming", "Daily Use"]
+app_category_checkboxes = [urwid.CheckBox(option, state=False) for option in app_category_options]
 
-    def build_config(self):
-        hostname = self.query_one("#hostname", Input).value.strip() or "archlinux"
-        locale = self.query_one("#locale", Input).value.strip() or "en_US.UTF-8"
-        timezone = self.query_one("#timezone", Input).value.strip() or "America/New_York"
-        username = self.query_one("#username", Input).value.strip() or "yourusername"
-        password = self.query_one("#password", Input).value.strip() or "yourpassword"
+# Notice regarding preinstalled apps.
+preinstall_notice = urwid.Text(
+    ('info',
+    "Note: In addition to the selected categories, several extra applications "
+    "(e.g. multiple app stores) will be preinstalled."
+    )
+)
 
-        # Determine the selected disk.
-        selected_disk = None
-        for rb in self.disk_buttons:
-            if rb.value:
-                selected_disk = rb.label
-                break
-        if not selected_disk:
-            self.status_display.update("[error]Error: You must select a disk before installing.[/error]")
-            return None
+# Create Install button.
+install_button = urwid.AttrWrap(urwid.Button("Install", on_press=on_install_pressed), 'buttn', 'buttnf')
+status_text = urwid.Text("", align='left')
 
-        # Gather selected application categories.
-        selected_categories = [cb.label for cb in self.app_categories if cb.value]
+# Arrange all widgets.
+widgets = [
+    welcome_text,
+    separator,
+    hostname_edit,
+    locale_edit,
+    timezone_edit,
+    separator,
+    user_edit,
+    password_edit,
+    separator,
+    disk_text
+]
+widgets.extend(disk_radio_buttons)
+widgets.append(separator)
+widgets.append(app_category_text)
+widgets.extend(app_category_checkboxes)
+widgets.append(preinstall_notice)
+widgets.append(separator)
+widgets.append(install_button)
+widgets.append(separator)
+widgets.append(urwid.Text(('banner', "Status:")))
+widgets.append(status_text)
 
-        return {
-            "hostname": hostname,
-            "locale": locale,
-            "timezone": timezone,
-            "user": {
-                "name": username,
-                "password": password,
-                "sudo": True
-            },
-            "disk_config": custom_partitioning(selected_disk),
-            "app_categories": selected_categories
-        }
+# Build the UI layout.
+pile = urwid.Pile(widgets)
+filler = urwid.Filler(pile, valign='top')
 
-    def perform_installation(self, config):
-        success, message = run_installation(config)
-        self.status_display.update(message)
-        if not success:
-            # Additional error handling could be added here.
-            pass
-
-if __name__ == "__main__":
-    InstallerApp().run()
+# Create and run the main loop.
+loop = urwid.MainLoop(filler, palette=palette)
+loop.run()
