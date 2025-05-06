@@ -266,7 +266,7 @@ if __name__ == '__main__':
     #      sys.exit(1)
 
     app = QApplication(sys.argv)
-    # Optional: Apply a style like Fusion for consistency if Breeze isn't default
-    # app.setStyle('Fusion')
+
+    #app.setStyle('Fusion')
     installer = BaseInstaller()
     sys.exit(app.exec_())
