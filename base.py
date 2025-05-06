@@ -153,7 +153,7 @@ class BaseInstaller(QWidget):
             # Fallback or just report error if specific command fails?
             # For now, just report the error. Could add fallback to generic network settings.
             self.update_status(f"Error opening Wi-Fi settings: {e}")
-            QMessageBox.critical(self, "Error", f"An unexpected error occurred while trying to open Wi-Fi settings:\n{e}\n\nYou may need to open System Settings manually.")
+            QMessageBox.critical(self, "Error", f"An unexpected error occurred while trying to open Wi-Fi settings:\n{e}")
             self.retry_button.show() # Still allow retry even if auto-open failed
             self.start_button.hide() # Hide start button once process begins/needs retry
 
@@ -207,7 +207,7 @@ class BaseInstaller(QWidget):
              return
 
         self.update_status("Launching the main installer (requires administrator privileges)...")
-        command = ['/usr/lib/kf6/kdesu', 'python3', MAIN_INSTALLER_SCRIPT] # Use python3 explicitly
+        command = ['sudo', 'python3', MAIN_INSTALLER_SCRIPT] # Use python3 explicitly
 
         try:
             print(f"Running command: {' '.join(command)}")
@@ -254,19 +254,19 @@ class BaseInstaller(QWidget):
 
 # --- Main Execution ---
 if __name__ == '__main__':
-    if os.geteuid() == 0:
-         print("Error: Please do not run this base setup script with sudo or as root.")
-         print("It will request administrator privileges only when needed to launch the main installer.")
-         try:
-             app_check = QApplication(sys.argv)
-             QMessageBox.critical(None, "Permission Error", "Please do not run this base setup script with sudo or as root.\n\nIt will request administrator privileges later if required.")
-         except Exception:
-             pass
-         sys.exit(1)
+    # Removed the check for root privileges and the associated messages
+    # if os.geteuid() == 0:
+    #      print("Error: Please do not run this base setup script with sudo or as root.")
+    #      print("It will request administrator privileges only when needed to launch the main installer.")
+    #      try:
+    #          app_check = QApplication(sys.argv)
+    #          QMessageBox.critical(None, "Permission Error", "Please do not run this base setup script with sudo or as root.\n\nIt will request administrator privileges later if required.")
+    #      except Exception:
+    #          pass
+    #      sys.exit(1)
 
     app = QApplication(sys.argv)
     # Optional: Apply a style like Fusion for consistency if Breeze isn't default
     # app.setStyle('Fusion')
     installer = BaseInstaller()
     sys.exit(app.exec_())
-
