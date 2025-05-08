@@ -1,562 +1,638 @@
-##############################################################################
-# Mai Bloom OS Installer - GUI Interface
-# Designed to work with an InstallerEngineThread using Archinstall library.
-# Version with SyntaxError fix in dummy class definitions.
-##############################################################################
-
 import sys
 import os
-import traceback
-import time
-import json # Needed only if trigger_disk_scan uses lsblk directly as fallback
-import logging # For __main__ block logging
 from pathlib import Path
-from typing import Any, TYPE_CHECKING, Optional, Dict, List, Union
+import subprocess # For checking root
 
-# --- PyQt5 Imports ---
-from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
-                             QLabel, QLineEdit, QPushButton, QComboBox,
-                             QMessageBox, QFileDialog, QTextEdit, QCheckBox,
-                             QGroupBox, QGridLayout, QSplitter)
-from PyQt5.QtCore import QThread, pyqtSignal, Qt # QThread needed for type hinting if checking thread state
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QStackedWidget, QWidget,
+    QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
+    QListWidget, QListWidgetItem, QCheckBox, QMessageBox, QTextEdit,
+    QFileDialog, QGroupBox, QFormLayout
+)
+from PyQt5.QtCore import QThread, pyqtSignal, Qt
+from PyQt5.QtGui import QFont
 
-# --- Placeholder Definitions ---
-# These are needed so the GUI code can run standalone for testing/viewing,
-# even if the backend thread and archinstall library aren't fully available yet.
-# Replace these with actual imports and logic in your final integrated script.
-
-ARCHINSTALL_LIBRARY_AVAILABLE = False # Assume library failed to load for standalone GUI
-ARCHINSTALL_IMPORT_ERROR = "Placeholder - Check actual imports in full script"
-DEFAULT_DESKTOP_ENVIRONMENT_PROFILE = "kde"
-
-# Dummy/Placeholder classes and variables if archinstall library import fails
+# Archinstall imports (ensure archinstall is installed)
 try:
-    # In full script, real imports go here. If they fail, this except block runs.
-    raise ImportError("Simulating import failure for placeholder setup") 
+    from archinstall import Installer, ProfileConfiguration, profile_handler, User, sys_info
+    from archinstall.lib.disk.device_handler import list_block_devices, BlockDevice
+    from archinstall.lib.disk.device_model import FilesystemType
+    from archinstall.lib.disk.disk_layout import DiskLayoutConfiguration
+    from archinstall.lib.disk.encryption import DiskEncryption
+    from archinstall.lib.disk.filesystem import FilesystemHandler
+    from archinstall.lib.disk.guided_partitioning import suggest_single_disk_layout
+    from archinstall.lib.disk.constants import LUKS2, PART_ROOT
+    from archinstall.default_profiles.minimal import MinimalProfile
 except ImportError as e:
-    ARCHINSTALL_IMPORT_ERROR = e
-    # --- Define Dummy Placeholders ---
-    class ArchinstallError(Exception): pass
-    class UserInteractionRequired(Exception): pass
-    class Bootloader: Grub = 'grub'; SystemdBoot = 'systemd-boot' 
-    class DiskLayoutType: Default = 'Default'; Pre_mount = 'Pre_mount' 
-    class WipeMode: Secure = 'Secure' 
-    
-    # --- CORRECTED FilesystemType Dummy Class ---
-    class FilesystemType: 
-        def __init__(self, name: str):
-            self.name = name
-    # --- End Correction ---
+    print(f"Error importing archinstall modules: {e}")
+    print("Please ensure archinstall is installed and accessible in your Python environment.")
+    # Show a pop-up if possible, then exit
+    app_temp = QApplication.instance()
+    if not app_temp:
+        app_temp = QApplication(sys.argv)
+    QMessageBox.critical(None, "Import Error", f"Could not import archinstall modules: {e}\n\nPlease ensure archinstall is installed.")
+    sys.exit(1)
 
-    class DiskLayoutConfiguration: 
-        # Add attributes needed by GUI/Engine placeholders if accessed
-        def __init__(self, *args, **kwargs): 
-            self.config_type=DiskLayoutType.Pre_mount
-            self.device=kwargs.get('device', None)
-            self.wipe=kwargs.get('wipe', False)
-            self.fs_type=kwargs.get('fs_type', FilesystemType('unknown'))
 
-    class LocaleConfiguration: 
-        def __init__(self, kb_layout:str='us', sys_lang:str='en_US.UTF-8', sys_enc:str='UTF-8', *args, **kwargs):
-            self.kb_layout = kb_layout
-            self.sys_lang = sys_lang
-            self.sys_enc = sys_enc
+# --- Configuration ---
+MOUNT_POINT = Path('/mnt') # Standard mount point for Arch Linux installation
+MAI_BLOOM_PACKAGES = [
+    'xorg', 'sddm', 'plasma-desktop', 'konsole', 'dolphin', 'ark', 'kate', # KDE Plasma essentials
+    'networkmanager', # For network connectivity
+    'linux-firmware', # Firmware for hardware
+    'nano', 'wget', 'git' # User's requested utilities
+]
+# 'linux' kernel is added separately by archinstall's Installer class
 
-    class ProfileConfiguration: 
-        def __init__(self, profile=None, *args, **kwargs): 
-            # Give the dummy profile a 'name' attribute if accessed
-            class DummyProfile: name="DummyProfile"
-            self.profile = profile or DummyProfile()
+class WorkerThread(QThread):
+    progress_updated = pyqtSignal(str)
+    installation_finished = pyqtSignal(bool, str) # success (bool), message (str)
 
-    class User: 
-        def __init__(self, user_name:str='dummy', password:str='', sudo:bool=False, *args, **kwargs): 
-            self.user_name = user_name
-            # Password should not be stored directly in real scenario
-            self._password = password 
-            self.sudo = sudo
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self._is_interrupted = False
 
-    class DiskEncryption: 
-        class EncryptionType: NoEncryption='NoEncryption' 
-        def __init__(self, *args, **kwargs): self.encryption_type = self.EncryptionType.NoEncryption
+    def run(self):
+        try:
+            self.progress_updated.emit("Starting installation process...")
+            self.progress_updated.emit(f"Selected disk: {self.config['disk'].path}")
+            self.progress_updated.emit(f"Hostname: {self.config['hostname']}")
+            self.progress_updated.emit(f"Username: {self.config['username']}")
+            self.progress_updated.emit(f"Encryption enabled: {self.config['encrypt']}")
+            self.progress_updated.emit(f"Filesystem: {self.config['filesystem_type'].value}")
 
-    class Installer: # Dummy Installer
-        def __init__(self, *args, **kwargs): pass
-        def __enter__(self): return self 
-        def __exit__(self, exc_type, exc_val, exc_tb): pass
-        # Add dummy methods if called by GUI/Engine placeholders
-        def mount_ordered_layout(self): logging.info("Mock Installer: mount_ordered_layout()")
-        def minimal_installation(self, *args, **kwargs): logging.info("Mock Installer: minimal_installation()")
-        def add_additional_packages(self, *args, **kwargs): logging.info("Mock Installer: add_additional_packages()")
-        def create_users(self, *args, **kwargs): logging.info("Mock Installer: create_users()")
-        def add_bootloader(self, *args, **kwargs): logging.info("Mock Installer: add_bootloader()")
-        def set_timezone(self, *args, **kwargs): logging.info("Mock Installer: set_timezone()")
-        def user_set_pw(self, *args, **kwargs): logging.info("Mock Installer: user_set_pw()")
-        def activate_time_synchronization(self, *args, **kwargs): logging.info("Mock Installer: activate_time_synchronization()")
-        def enable_service(self, *args, **kwargs): logging.info("Mock Installer: enable_service()")
-        def genfstab(self, *args, **kwargs): logging.info("Mock Installer: genfstab()")
-        def setup_swap(self, *args, **kwargs): logging.info("Mock Installer: setup_swap()")
-        def sanity_check(self, *args, **kwargs): logging.info("Mock Installer: sanity_check()")
-        # Add other methods used in engine thread if necessary
-
-    class FilesystemHandler: # Dummy Handler
-        def __init__(self, *args, **kwargs): pass
-        def perform_filesystem_operations(self): logging.info("Mock FilesystemHandler: perform_filesystem_operations()")
-    
-    class profile_handler: # Dummy handler
-        @staticmethod
-        def install_profile_config(*args, **kwargs): logging.info("Mock profile_handler: install_profile_config()")
-        # Add get_profile if gather_settings tries to use it
-        @staticmethod
-        def get_profile(name): 
-            class DummyProfile: name=name
-            return DummyProfile()
+            if not MOUNT_POINT.exists():
+                MOUNT_POINT.mkdir(parents=True, exist_ok=True)
             
-    class KdeProfile: # Dummy Profile class
-         def __init__(self, *args, **kwargs): self.name = "MockKDEProfile" 
-         def post_install(self, installation): logging.info("Mock KdeProfile: post_install()")
+            self.progress_updated.emit("Suggesting disk layout...")
+            # 1. Disk Configuration
+            # We assume target_disk is a BlockDevice object
+            target_disk = self.config['disk']
+            disk_layout_config = suggest_single_disk_layout(
+                target_disk,
+                default_fs_type=self.config['filesystem_type'],
+                boot_type=sys_info.BOOT_MODE # 'UEFI' or 'BIOS'
+            )
+            self.progress_updated.emit(f"Disk layout suggested for {sys_info.BOOT_MODE} mode.")
 
-    class SysInfo: # Dummy SysInfo
-        @staticmethod 
-        def has_uefi(): return os.path.exists("/sys/firmware/efi") 
+            # 2. Disk Encryption (Optional)
+            disk_encryption_obj = None
+            if self.config['encrypt']:
+                self.progress_updated.emit("Setting up disk encryption...")
+                if not self.config['enc_password']:
+                    self.installation_finished.emit(False, "Encryption password not provided.")
+                    return
 
-    # Define dummy modules if code tries `module.Class` syntax
-    class DummyArchinstallModule: 
-         # Assign classes to module if needed
-         lib = None # Define lib attribute
-         SysInfo = SysInfo 
-         # Define arguments/storage if accessed via archinstall.arguments
-         arguments = {} 
-         storage = {'MOUNT_POINT': Path('/mnt/maibloom_install_fallback')}
-    archinstall = DummyArchinstallModule() 
+                # Apply encryption to the root partition(s) in the suggested layout
+                found_root = False
+                for dev_mod in disk_layout_config.device_modifications:
+                    for part_mod in dev_mod.partitions:
+                        if part_mod.mountpoint == Path('/'): # Standard root mountpoint
+                            part_mod.encrypt = True
+                            part_mod.encryption_type = LUKS2 # or 'luks'
+                            # The password will be taken from the global disk_encryption_obj
+                            found_root = True
+                            self.progress_updated.emit(f"Root partition {part_mod.device_path} marked for encryption.")
+                
+                if not found_root:
+                    self.installation_finished.emit(False, "Could not find root partition in layout to encrypt.")
+                    return
 
-    class DummyDiskModule:
-         DiskLayoutConfiguration=DiskLayoutConfiguration 
-         DiskLayoutType=DiskLayoutType
-         EncryptionType=DiskEncryption.EncryptionType 
-         WipeMode=WipeMode
-         FilesystemType=FilesystemType
-         FilesystemHandler=FilesystemHandler
-         class BlockDevice: pass # Dummy for type hints etc.
-         @staticmethod # Make callable as disk.get_all_blockdevices()
-         def get_all_blockdevices(): # Example placeholder function
-             class MockBlockDevice: # Copied from engine placeholder
-                 def __init__(self, path, size, model, dev_type, ro, **kwargs):
-                    self.path = Path(path); self.size = size; self.model = model; self.type = dev_type; self.read_only = ro
-                    self.pkname = kwargs.get('pkname'); self.tran = kwargs.get('tran', 'sata'); self.mountpoint=None; self.children=[]
-             return [MockBlockDevice("/dev/mock_disk", 100*1024**3, "Mock Disk", "disk", False)]
+                disk_encryption_obj = DiskEncryption(
+                    encryption_type=LUKS2,
+                    encryption_password=self.config['enc_password']
+                )
+                self.progress_updated.emit("DiskEncryption object created.")
 
-    class DummyLocaleModule: LocaleConfiguration=LocaleConfiguration
-    class DummyModelsModule: 
-         User=User; ProfileConfiguration=ProfileConfiguration; DiskEncryption=DiskEncryption
-         AudioConfiguration=AudioConfiguration; NetworkConfiguration=NetworkConfiguration; Bootloader=Bootloader
-         Profile=KdeProfile # Assign dummy KdeProfile to Profile for simplicity
-    class DummyProfileHandlerModule: profile_handler=profile_handler; KdeProfile=KdeProfile
+            if self._is_interrupted: return
 
-    class DummyArchinstallLib: # Define dummy lib structure
-        disk = DummyDiskModule
-        locale = DummyLocaleModule
-        models = DummyModelsModule
-        profile = DummyProfileHandlerModule # Contains profile_handler and KdeProfile
-        installer = Installer # Assign dummy Installer
-        # Add other submodules if accessed e.g. exceptions, configuration
-        exceptions = type('exceptions', (object,), {'ArchinstallError': ArchinstallError, 'UserInteractionRequired': UserInteractionRequired})()
+            # 3. Filesystem Operations
+            self.progress_updated.emit("Initializing filesystem handler...")
+            fs_handler = FilesystemHandler(disk_layout_config, disk_encryption_obj)
+
+            self.progress_updated.emit("\nWARNING: PERFORMING FILESYSTEM OPERATIONS (FORMATTING)!")
+            # In a real GUI, you'd have a log window. Here, we just emit.
+            # fs_handler.perform_filesystem_operations() might print to stdout/stderr.
+            # Consider capturing its output if possible or providing a callback for progress.
+            # For now, we assume it logs to console where this script runs.
+            try:
+                fs_handler.perform_filesystem_operations(show_output=False) # show_output to archinstall's internal logging
+            except Exception as e:
+                self.installation_finished.emit(False, f"Filesystem operations failed: {e}")
+                return
+
+            self.progress_updated.emit("Filesystem operations completed.")
+            if self._is_interrupted: return
+
+            # 4. Installation
+            self.progress_updated.emit("Starting Arch Linux installation...")
+            with Installer(
+                MOUNT_POINT,
+                disk_layout_config,
+                disk_encryption=disk_encryption_obj,
+                kernels=['linux'] # Default kernel
+            ) as installation:
+                if self._is_interrupted: installation.abort(); return
+
+                self.progress_updated.emit("Mounting partitions...")
+                installation.mount_ordered_layout()
+                if self._is_interrupted: installation.abort(); return
+
+                self.progress_updated.emit(f"Performing minimal installation with hostname: {self.config['hostname']}")
+                # Minimal installation (pacstrap base, fstab, locale, time, etc.)
+                # The minimal_installation itself can take a while and does network ops.
+                # It also calls _setup_hardware_specific_dependencies internally (like intel-ucode)
+                installation.minimal_installation(
+                    hostname=self.config['hostname'],
+                    packages=['base', 'base-devel'] # Ensure these are part of minimal
+                )
+                if self._is_interrupted: installation.abort(); return
+
+                self.progress_updated.emit(f"Installing Mai Bloom OS packages: {', '.join(MAI_BLOOM_PACKAGES)}")
+                installation.add_additional_packages(MAI_BLOOM_PACKAGES)
+                if self._is_interrupted: installation.abort(); return
+
+                # Install a minimal profile (handles some basics like bootloader if not done yet)
+                self.progress_updated.emit("Installing minimal profile configuration...")
+                profile_config = ProfileConfiguration(MinimalProfile()) # MinimalProfile is very basic
+                profile_handler.install_profile_config(installation, profile_config)
+                if self._is_interrupted: installation.abort(); return
+                
+                # Bootloader should be handled by minimal_installation or profile.
+                # If specific bootloader configuration is needed, it would be here.
+                # For example: installation.install_bootloader() if not covered.
+
+                self.progress_updated.emit("Creating user...")
+                user = User(self.config['username'], self.config['password'], sudo=True)
+                installation.create_users(user)
+                if self._is_interrupted: installation.abort(); return
+                
+                # KDE specific configurations (e.g., enabling SDDM)
+                if 'sddm' in MAI_BLOOM_PACKAGES:
+                    self.progress_updated.emit("Enabling SDDM display manager...")
+                    installation.enable_service('sddm') # This runs systemctl enable in chroot
+
+                # Any other Mai Bloom OS specific post-install configurations could go here
+                # by chrooting into the installation:
+                # with installation. 入っ(MOUNT_POINT) as chroot:
+                # chroot.run(['ln', '-sf', '/usr/share/zoneinfo/Region/City', '/etc/localtime'])
+                # chroot.run(['hwclock', '--systohc'])
+                # (Many of these are handled by minimal_installation or profiles though)
+
+                self.progress_updated.emit("Finalizing installation...")
+                # Unmount etc. is handled by Installer context manager exit
+
+            self.progress_updated.emit("Installation process finished successfully.")
+            self.installation_finished.emit(True, "Mai Bloom OS has been installed successfully!\nYou can now reboot your system.")
+
+        except Exception as e:
+            self.progress_updated.emit(f"An error occurred: {e}")
+            import traceback
+            self.progress_updated.emit(traceback.format_exc())
+            self.installation_finished.emit(False, f"Installation failed: {e}")
+
+    def stop(self):
+        self._is_interrupted = True
+        self.progress_updated.emit("Attempting to stop installation...")
+
+
+class WelcomePage(QWidget):
+    def __init__(self, parent_installer):
+        super().__init__()
+        self.parent_installer = parent_installer
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+
+        title = QLabel("Welcome to Mai Bloom OS Installer")
+        title.setFont(QFont("Arial", 24, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+
+        intro_text = QLabel(
+            "This installer will guide you through installing Mai Bloom OS, a customized Arch Linux distribution with KDE Plasma.\n\n"
+            "Important: This installer will format the selected disk. Make sure to back up any important data."
+        )
+        intro_text.setWordWrap(True)
+        intro_text.setAlignment(Qt.AlignCenter)
+        layout.addWidget(intro_text)
         
-    archinstall.lib = DummyArchinstallLib # Assign to main dummy module
-
-    # Define dummy Argument constants
-    ARG_DISK_CONFIG = 'disk_config'; ARG_LOCALE_CONFIG = 'locale_config'; ARG_ROOT_PASSWORD = '!root-password'; ARG_USERS = '!users'; ARG_PROFILE_CONFIG = 'profile_config'; ARG_HOSTNAME = 'hostname'; ARG_PACKAGES = 'packages'; ARG_BOOTLOADER = 'bootloader'; ARG_TIMEZONE = 'timezone'; ARG_KERNE = 'kernels'; ARG_NTP = 'ntp'; ARG_SWAP = 'swap'; ARG_ENCRYPTION = 'disk_encryption'
-    logging.warning("Using placeholder definitions for Archinstall components due to import error.")
-# --- End Placeholder Definitions ---
-
-
-# --- App Configuration ---
-APP_CATEGORIES = {
-    "Daily Use": ["firefox", "vlc", "gwenview", "okular", "libreoffice-still", "ark", "kate"],
-    "Programming": ["git", "code", "python", "gcc", "gdb", "base-devel"],
-    "Gaming": ["steam", "lutris", "wine", "noto-fonts-cjk"],
-    "Education": ["gcompris-qt", "kgeography", "stellarium", "kalgebra"]
-}
-DEFAULT_DESKTOP_ENVIRONMENT_PROFILE = "kde" # Mai Bloom OS default
-MOUNT_POINT = Path('/mnt/maibloom_install') # Ensure consistent definition
-
-def check_root(): return os.geteuid() == 0
+        if os.geteuid() != 0:
+            warn_root = QLabel("<b>Warning: This installer needs to be run with root privileges (e.g., using sudo). Please restart with sudo if you haven't.</b>")
+            warn_root.setStyleSheet("color: red;")
+            warn_root.setAlignment(Qt.AlignCenter)
+            layout.addWidget(warn_root)
 
 
-# --- Main Application Window (GUI using PyQt5) ---
-class MaiBloomInstallerApp(QWidget):
-    """Main GUI Window for the installer."""
+        next_button = QPushButton("Next")
+        next_button.clicked.connect(self.parent_installer.next_page)
+        layout.addStretch()
+        layout.addWidget(next_button, alignment=Qt.AlignRight)
+
+
+class DiskSetupPage(QWidget):
+    def __init__(self, parent_installer):
+        super().__init__()
+        self.parent_installer = parent_installer
+        layout = QVBoxLayout(self)
+
+        title = QLabel("Disk Setup")
+        title.setFont(QFont("Arial", 18, QFont.Bold))
+        layout.addWidget(title)
+
+        layout.addWidget(QLabel("Select the disk for installation:"))
+        self.disk_list_widget = QListWidget()
+        self.disk_list_widget.setSelectionMode(QListWidget.SingleSelection)
+        layout.addWidget(self.disk_list_widget)
+        self.refresh_disks()
+
+        self.refresh_button = QPushButton("Refresh Disks")
+        self.refresh_button.clicked.connect(self.refresh_disks)
+        layout.addWidget(self.refresh_button)
+        
+        # Filesystem (fixed for now as per original script)
+        # fs_label = QLabel(f"Filesystem type: {self.parent_installer.config['filesystem_type'].value} (default)")
+        # layout.addWidget(fs_label)
+
+        # Encryption
+        encryption_group = QGroupBox("Disk Encryption (Optional)")
+        encryption_layout = QVBoxLayout()
+        self.encrypt_checkbox = QCheckBox("Encrypt the system partition (LUKS)")
+        self.encrypt_checkbox.stateChanged.connect(self.toggle_encryption_fields)
+        encryption_layout.addWidget(self.encrypt_checkbox)
+
+        self.enc_password_label = QLabel("Encryption Password:")
+        self.enc_password_edit = QLineEdit()
+        self.enc_password_edit.setEchoMode(QLineEdit.Password)
+        self.enc_confirm_password_label = QLabel("Confirm Encryption Password:")
+        self.enc_confirm_password_edit = QLineEdit()
+        self.enc_confirm_password_edit.setEchoMode(QLineEdit.Password)
+        
+        encryption_layout.addWidget(self.enc_password_label)
+        encryption_layout.addWidget(self.enc_password_edit)
+        encryption_layout.addWidget(self.enc_confirm_password_label)
+        encryption_layout.addWidget(self.enc_confirm_password_edit)
+        encryption_group.setLayout(encryption_layout)
+        layout.addWidget(encryption_group)
+        self.toggle_encryption_fields() # Set initial state
+
+        # Navigation
+        nav_layout = QHBoxLayout()
+        back_button = QPushButton("Back")
+        back_button.clicked.connect(self.parent_installer.prev_page)
+        next_button = QPushButton("Next")
+        next_button.clicked.connect(self.proceed)
+        nav_layout.addWidget(back_button)
+        nav_layout.addStretch()
+        nav_layout.addWidget(next_button)
+        layout.addLayout(nav_layout)
+
+    def refresh_disks(self):
+        self.disk_list_widget.clear()
+        try:
+            # Using list_block_devices which returns a dictionary
+            # BlockDevice.all_disks() might be another option, returns List[BlockDevice]
+            devices = list_block_devices() # This returns dict, values are BlockDevice objects
+            for path, device in devices.items():
+                if not device.is_optical and not device.is_loop_device and device.size: # Filter out CD/DVD, loop, and empty devices
+                    item_text = f"{device.path} - {device.device_info.model if device.device_info else 'N/A'} ({device.size_hr})"
+                    list_item = QListWidgetItem(item_text)
+                    list_item.setData(Qt.UserRole, device) # Store BlockDevice object
+                    self.disk_list_widget.addItem(list_item)
+        except Exception as e:
+            QMessageBox.warning(self, "Disk Error", f"Could not list disks: {e}")
+
+
+    def toggle_encryption_fields(self):
+        enable = self.encrypt_checkbox.isChecked()
+        self.enc_password_label.setVisible(enable)
+        self.enc_password_edit.setVisible(enable)
+        self.enc_confirm_password_label.setVisible(enable)
+        self.enc_confirm_password_edit.setVisible(enable)
+
+    def proceed(self):
+        selected_items = self.disk_list_widget.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "Selection Error", "Please select a disk for installation.")
+            return
+        
+        selected_disk_object = selected_items[0].data(Qt.UserRole)
+        self.parent_installer.config['disk'] = selected_disk_object
+
+        self.parent_installer.config['encrypt'] = self.encrypt_checkbox.isChecked()
+        if self.parent_installer.config['encrypt']:
+            enc_pass = self.enc_password_edit.text()
+            enc_confirm_pass = self.enc_confirm_password_edit.text()
+            if not enc_pass:
+                QMessageBox.warning(self, "Input Error", "Encryption password cannot be empty.")
+                return
+            if enc_pass != enc_confirm_pass:
+                QMessageBox.warning(self, "Input Error", "Encryption passwords do not match.")
+                return
+            self.parent_installer.config['enc_password'] = enc_pass
+        else:
+            self.parent_installer.config['enc_password'] = None
+        
+        self.parent_installer.next_page()
+
+class UserSetupPage(QWidget):
+    def __init__(self, parent_installer):
+        super().__init__()
+        self.parent_installer = parent_installer
+        layout = QVBoxLayout(self)
+
+        title = QLabel("User Configuration")
+        title.setFont(QFont("Arial", 18, QFont.Bold))
+        layout.addWidget(title)
+
+        form_layout = QFormLayout()
+        self.hostname_edit = QLineEdit(self.parent_installer.config.get("hostname", "maibloom-os"))
+        self.username_edit = QLineEdit(self.parent_installer.config.get("username", "user"))
+        self.password_edit = QLineEdit()
+        self.password_edit.setEchoMode(QLineEdit.Password)
+        self.confirm_password_edit = QLineEdit()
+        self.confirm_password_edit.setEchoMode(QLineEdit.Password)
+
+        form_layout.addRow("Hostname:", self.hostname_edit)
+        form_layout.addRow("Username:", self.username_edit)
+        form_layout.addRow("Password:", self.password_edit)
+        form_layout.addRow("Confirm Password:", self.confirm_password_edit)
+        layout.addLayout(form_layout)
+
+        # Navigation
+        nav_layout = QHBoxLayout()
+        back_button = QPushButton("Back")
+        back_button.clicked.connect(self.parent_installer.prev_page)
+        next_button = QPushButton("Next")
+        next_button.clicked.connect(self.proceed)
+        nav_layout.addWidget(back_button)
+        nav_layout.addStretch()
+        nav_layout.addWidget(next_button)
+        layout.addLayout(nav_layout)
+
+    def proceed(self):
+        hostname = self.hostname_edit.text().strip()
+        username = self.username_edit.text().strip()
+        password = self.password_edit.text()
+        confirm_password = self.confirm_password_edit.text()
+
+        if not hostname:
+            QMessageBox.warning(self, "Input Error", "Hostname cannot be empty.")
+            return
+        if not username:
+            QMessageBox.warning(self, "Input Error", "Username cannot be empty.")
+            return
+        if not password:
+            QMessageBox.warning(self, "Input Error", "Password cannot be empty.")
+            return
+        if password != confirm_password:
+            QMessageBox.warning(self, "Input Error", "Passwords do not match.")
+            return
+
+        self.parent_installer.config['hostname'] = hostname
+        self.parent_installer.config['username'] = username
+        self.parent_installer.config['password'] = password
+        self.parent_installer.next_page()
+
+
+class SummaryPage(QWidget):
+    def __init__(self, parent_installer):
+        super().__init__()
+        self.parent_installer = parent_installer
+        layout = QVBoxLayout(self)
+
+        title = QLabel("Installation Summary")
+        title.setFont(QFont("Arial", 18, QFont.Bold))
+        layout.addWidget(title)
+
+        self.summary_text = QTextEdit()
+        self.summary_text.setReadOnly(True)
+        layout.addWidget(self.summary_text)
+
+        warning_label = QLabel(
+            "<b>WARNING:</b> Clicking 'Install' will format the selected disk and install Mai Bloom OS. "
+            "This process is irreversible and will erase all data on the selected disk."
+        )
+        warning_label.setWordWrap(True)
+        warning_label.setStyleSheet("color: red;")
+        layout.addWidget(warning_label)
+        
+        # Navigation
+        nav_layout = QHBoxLayout()
+        back_button = QPushButton("Back")
+        back_button.clicked.connect(self.parent_installer.prev_page)
+        self.install_button = QPushButton("Install")
+        self.install_button.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        self.install_button.clicked.connect(self.parent_installer.start_installation_confirmed)
+        nav_layout.addWidget(back_button)
+        nav_layout.addStretch()
+        nav_layout.addWidget(self.install_button)
+        layout.addLayout(nav_layout)
+
+    def update_summary(self):
+        config = self.parent_installer.config
+        summary = f"""
+        <b>Installation Target:</b>
+        Disk: {config['disk'].path if config['disk'] else 'Not selected'}
+        Filesystem: {config['filesystem_type'].value}
+        Boot Mode: {sys_info.BOOT_MODE}
+
+        <b>System Configuration:</b>
+        Hostname: {config['hostname']}
+        Username: {config['username']}
+        Create Sudo User: Yes
+
+        <b>Disk Encryption:</b>
+        Encrypt System: {'Yes' if config['encrypt'] else 'No'}
+        Encryption Password: {'Set' if config['encrypt'] and config['enc_password'] else 'Not set'}
+
+        <b>Packages to be installed (Core + Mai Bloom OS):</b>
+        Kernel: linux
+        Base: base, base-devel
+        Mai Bloom OS (KDE Plasma & Utils): {', '.join(MAI_BLOOM_PACKAGES)}
+        Mount Point: {MOUNT_POINT}
+
+        Please review these settings carefully.
+        """
+        self.summary_text.setHtml(summary)
+
+
+class InstallationPage(QWidget):
+    def __init__(self, parent_installer):
+        super().__init__()
+        self.parent_installer = parent_installer
+        layout = QVBoxLayout(self)
+
+        title = QLabel("Installation Progress")
+        title.setFont(QFont("Arial", 18, QFont.Bold))
+        layout.addWidget(title)
+
+        self.progress_log = QTextEdit()
+        self.progress_log.setReadOnly(True)
+        layout.addWidget(self.progress_log)
+
+        self.status_label = QLabel("Starting installation...")
+        layout.addWidget(self.status_label)
+
+        self.finish_button = QPushButton("Finish")
+        self.finish_button.setEnabled(False)
+        self.finish_button.clicked.connect(QApplication.instance().quit)
+        
+        self.cancel_button = QPushButton("Cancel Installation")
+        self.cancel_button.clicked.connect(self.parent_installer.cancel_installation)
+        self.cancel_button.setStyleSheet("background-color: #f44336; color: white;")
+
+
+        nav_layout = QHBoxLayout()
+        nav_layout.addWidget(self.cancel_button)
+        nav_layout.addStretch()
+        nav_layout.addWidget(self.finish_button)
+        layout.addLayout(nav_layout)
+
+
+    def log_message(self, message):
+        self.progress_log.append(message)
     
+    def update_status(self, message):
+        self.status_label.setText(message)
+
+    def installation_complete(self, success, message):
+        self.update_status(message)
+        self.cancel_button.setEnabled(False)
+        self.finish_button.setEnabled(True)
+        if success:
+            QMessageBox.information(self, "Installation Successful", message)
+        else:
+            QMessageBox.critical(self, "Installation Failed", message)
+
+
+class MaiBloomInstaller(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.installer_thread = None # Worker thread reference
-        
-        # Initialize UI elements first before potentially showing error messages
-        self.hostname_input = QLineEdit("maibloom-os")
-        self.username_input = QLineEdit("maiuser")
-        self.password_input = QLineEdit()
-        self.locale_input = QLineEdit("en_US.UTF-8")
-        self.kb_layout_input = QLineEdit("us")
-        self.timezone_input = QLineEdit("UTC")
-        self.disk_combo = QComboBox()
-        self.scan_disks_button = QPushButton("Scan for Disks")
-        self.wipe_disk_checkbox = QCheckBox("Wipe disk & auto-configure standard layout")
-        self.app_category_checkboxes: Dict[str, QCheckBox] = {}
-        self.log_output = QTextEdit()
-        self.install_button = QPushButton(f"Install Mai Bloom OS ({DEFAULT_DESKTOP_ENVIRONMENT_PROFILE})")
-        
-        # Use a helper instance for non-threaded calls like disk scan
-        # Ensure the dummy/real InstallerEngineThread is defined before this class
-        self._engine_helper = InstallerEngineThread() 
-        self._engine_helper.disk_scan_complete.connect(self.on_disk_scan_complete)
-        self._engine_helper.installation_log.connect(self.update_log_output_slot) # Connect to slot
+        self.setWindowTitle("Mai Bloom OS Installer")
+        self.setGeometry(100, 100, 800, 600) # x, y, width, height
 
-        self.init_ui() # Setup the user interface layout
-        self.update_log_output("Welcome to Mai Bloom OS Installer!")
-        
-        # Initial check for library availability
-        if not ARCHINSTALL_LIBRARY_AVAILABLE:
-             self.handle_library_load_error() # Show warning/disable UI
-        else:
-             self.update_log_output("Archinstall library assumed loaded (or using mocks).")
-             self.trigger_disk_scan() # Trigger initial scan
+        self.config = {
+            "disk": None,
+            "encrypt": False,
+            "enc_password": None,
+            "hostname": "maibloom-os",
+            "username": "bloom", # Default username for Mai Bloom OS
+            "password": None,
+            "filesystem_type": FilesystemType('ext4'),
+            # additional_packages are defined globally
+        }
 
-    def handle_library_load_error(self):
-        """Shows error if library failed to load."""
-        # This is called if the top-level import fails
-        self.update_log_output(f"CRITICAL ERROR: Archinstall library not loaded: {ARCHINSTALL_IMPORT_ERROR}", "ERROR")
-        QMessageBox.critical(self, "Startup Error", 
-                             f"Failed to load essential Archinstall library components:\n{ARCHINSTALL_IMPORT_ERROR}\n\n"
-                             "Please ensure Archinstall is correctly installed for the Python environment and accessible.\n"
-                             "The installer cannot function.")
-        # Disable buttons - other widgets might be usable for viewing layout
-        self.install_button.setEnabled(False)
-        self.scan_disks_button.setEnabled(False)
+        self.stacked_widget = QStackedWidget()
+        self.setCentralWidget(self.stacked_widget)
 
-    def init_ui(self):
-        """Sets up the GUI widgets and layouts."""
-        self.setWindowTitle(f'Mai Bloom OS Installer ({DEFAULT_DESKTOP_ENVIRONMENT_PROFILE} via Archinstall Lib)')
-        self.setGeometry(100, 100, 850, 700) # Window size and position
-        overall_layout = QVBoxLayout(self) # Main layout for the window
+        self.welcome_page = WelcomePage(self)
+        self.disk_page = DiskSetupPage(self)
+        self.user_page = UserSetupPage(self)
+        self.summary_page = SummaryPage(self)
+        self.install_page = InstallationPage(self)
 
-        # --- Top Title ---
-        title_label = QLabel(f"<b>Install Mai Bloom OS ({DEFAULT_DESKTOP_ENVIRONMENT_PROFILE})</b>")
-        title_label.setAlignment(Qt.AlignCenter)
-        overall_layout.addWidget(title_label)
-        overall_layout.addWidget(QLabel("<small>This installer uses the <b>archinstall</b> Python library directly for setup.</small>"))
-        
-        # --- Main Area (Splitter: Controls | Log) ---
-        splitter = QSplitter(Qt.Horizontal)
-        overall_layout.addWidget(splitter)
+        self.stacked_widget.addWidget(self.welcome_page)
+        self.stacked_widget.addWidget(self.disk_page)
+        self.stacked_widget.addWidget(self.user_page)
+        self.stacked_widget.addWidget(self.summary_page)
+        self.stacked_widget.addWidget(self.install_page)
 
-        # --- Left Pane: Controls ---
-        controls_widget = QWidget()
-        controls_layout = QVBoxLayout(controls_widget)
+        self.worker_thread = None
 
-        # GroupBox 1: Disk Setup
-        disk_group = QGroupBox("1. Disk Selection & Preparation")
-        disk_layout_vbox = QVBoxLayout()
-        self.scan_disks_button.setToolTip("Scan the system for installable disk drives using archinstall library.")
-        self.scan_disks_button.clicked.connect(self.trigger_disk_scan)
-        disk_layout_vbox.addWidget(self.scan_disks_button)
-        self.disk_combo.setToolTip("Select the target disk for installation.\nEnsure this is the correct disk!")
-        disk_layout_vbox.addLayout(self.create_form_row("Target Disk:", self.disk_combo))
-        self.wipe_disk_checkbox.setChecked(True)
-        self.wipe_disk_checkbox.setToolTip("IMPORTANT: This option attempts to instruct archinstall library to ERASE the selected disk\n"
-                                           "and create a standard partition layout (e.g., EFI, Swap, Root).\n"
-                                           "This requires correct implementation of DiskLayoutConfiguration in gather_settings().")
-        disk_layout_vbox.addWidget(self.wipe_disk_checkbox)
-        disk_group.setLayout(disk_layout_vbox)
-        controls_layout.addWidget(disk_group)
+    def next_page(self):
+        current_index = self.stacked_widget.currentIndex()
+        if current_index < self.stacked_widget.count() - 1:
+            # Special handling for summary page update
+            if self.stacked_widget.widget(current_index + 1) == self.summary_page:
+                self.summary_page.update_summary()
+            self.stacked_widget.setCurrentIndex(current_index + 1)
 
-        # GroupBox 2: System & User Configuration
-        system_group = QGroupBox("2. System & User Details"); 
-        system_layout_grid = QGridLayout()
-        self.hostname_input.setToolTip("Set the computer's network name (e.g., mypc).")
-        system_layout_grid.addWidget(QLabel("Hostname:"), 0, 0); system_layout_grid.addWidget(self.hostname_input, 0, 1)
-        self.username_input.setToolTip("Enter the desired username for your main account.")
-        system_layout_grid.addWidget(QLabel("Username:"), 1, 0); system_layout_grid.addWidget(self.username_input, 1, 1)
-        self.password_input.setPlaceholderText("Enter password (used for User & Root)"); self.password_input.setEchoMode(QLineEdit.Password)
-        self.password_input.setToolTip("Set the password for your user account.\nThis password will ALSO be set for the 'root' administrator account.")
-        system_layout_grid.addWidget(QLabel("Password (User+Root):"), 2, 0); system_layout_grid.addWidget(self.password_input, 2, 1)
-        self.locale_input.setToolTip("Set the system language and encoding (e.g., en_US.UTF-8, fr_FR.UTF-8).")
-        system_layout_grid.addWidget(QLabel("Locale:"), 3,0); system_layout_grid.addWidget(self.locale_input, 3,1)
-        self.kb_layout_input.setToolTip("Set the keyboard layout for the console (e.g., us, uk, de_nodeadkeys).")
-        system_layout_grid.addWidget(QLabel("Keyboard Layout:"), 4,0); system_layout_grid.addWidget(self.kb_layout_input, 4,1)
-        self.timezone_input.setToolTip("Set the system timezone (e.g., UTC, America/New_York, Europe/Paris).\nUse format Region/City.")
-        system_layout_grid.addWidget(QLabel("Timezone:"), 5,0); system_layout_grid.addWidget(self.timezone_input, 5,1)
-        system_group.setLayout(system_layout_grid)
-        controls_layout.addWidget(system_group)
-        
-        # GroupBox 3: Additional Applications
-        app_group = QGroupBox(f"3. Additional Applications (Optional)")
-        app_layout_grid = QGridLayout()
-        row, col = 0,0
-        for cat_name in APP_CATEGORIES.keys():
-            self.app_category_checkboxes[cat_name] = QCheckBox(f"{cat_name}")
-            pkg_list_tooltip = f"Install: {', '.join(APP_CATEGORIES[cat_name][:4])}"
-            if len(APP_CATEGORIES[cat_name]) > 4: pkg_list_tooltip += "..."
-            self.app_category_checkboxes[cat_name].setToolTip(pkg_list_tooltip)
-            app_layout_grid.addWidget(self.app_category_checkboxes[cat_name], row, col)
-            col +=1
-            if col > 1: col = 0; row +=1
-        app_group.setLayout(app_layout_grid)
-        controls_layout.addWidget(app_group)
-        
-        controls_layout.addStretch(1); splitter.addWidget(controls_widget)
+    def prev_page(self):
+        current_index = self.stacked_widget.currentIndex()
+        if current_index > 0:
+            self.stacked_widget.setCurrentIndex(current_index - 1)
 
-        # --- Right Pane: Log Output ---
-        log_group_box = QGroupBox("Installation Log"); log_layout_vbox = QVBoxLayout()
-        self.log_output.setReadOnly(True); self.log_output.setLineWrapMode(QTextEdit.NoWrap); self.log_output.setStyleSheet("font-family: monospace; background-color: #f0f0f0;") 
-        log_layout_vbox.addWidget(self.log_output); log_group_box.setLayout(log_layout_vbox)
-        splitter.addWidget(log_group_box)
-        splitter.setSizes([400, 450]) 
-        
-        # --- Bottom: Install Button ---
-        self.install_button.setStyleSheet("background-color: lightgreen; padding: 10px; font-weight: bold; border-radius: 5px;")
-        self.install_button.setToolTip("Begin the installation process using the configured settings.")
-        self.install_button.clicked.connect(self.start_installation)
-        button_layout = QHBoxLayout(); button_layout.addStretch(); button_layout.addWidget(self.install_button); button_layout.addStretch(); overall_layout.addLayout(button_layout)
+    def start_installation_confirmed(self):
+        confirm_msg = QMessageBox.warning(
+            self,
+            "Confirm Installation",
+            "This will erase all data on the selected disk and install Mai Bloom OS.\n"
+            "Are you sure you want to proceed?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if confirm_msg == QMessageBox.Yes:
+            self.stacked_widget.setCurrentWidget(self.install_page)
+            self.run_installation()
 
-    def create_form_row(self, label_text, widget):
-        """Helper method to create a standard Label + Widget horizontal layout."""
-        row_layout = QHBoxLayout(); label = QLabel(label_text); label.setFixedWidth(120) 
-        row_layout.addWidget(label); row_layout.addWidget(widget); return row_layout
+    def run_installation(self):
+        if os.geteuid() != 0:
+            QMessageBox.critical(self, "Root Privileges Required", "This installer must be run as root. Please restart with sudo.")
+            self.install_page.installation_complete(False, "Installation aborted: Not running as root.")
+            return
 
-    def trigger_disk_scan(self):
-        """Initiates disk scan using archinstall library helper (or placeholder)."""
-        if not ARCHINSTALL_LIBRARY_AVAILABLE:
-            self.update_log_output("Disk Scan unavailable: Archinstall library not loaded.", "ERROR"); return
-            
-        self.update_log_output("GUI: Requesting disk scan via archinstall library...")
-        self.scan_disks_button.setEnabled(False) # Disable button during scan
-        try:
-            # --- USER ACTION REQUIRED ---
-            # This call needs to execute the *actual* archinstall disk listing function.
-            # The helper's run_disk_scan method needs to be implemented for this.
-            self._engine_helper.run_disk_scan() 
-        except Exception as e: 
-             self.update_log_output(f"Failed to initiate disk scan call: {e}", "ERROR")
-             self.update_log_output(traceback.format_exc(), "ERROR")
-             QMessageBox.critical(self, "Disk Scan Error", f"Failed to start disk scan: {e}")
-             self.scan_disks_button.setEnabled(True) # Re-enable button on error
+        self.install_page.log_message("Preparing for installation...")
+        self.install_page.cancel_button.setEnabled(True)
+        self.install_page.finish_button.setEnabled(False)
 
-    @pyqtSlot(dict) # Explicitly define slot signature
-    def on_disk_scan_complete(self, disks_data: Dict[str, Dict]):
-        """Slot to handle the result of the disk scan signal."""
-        self.update_log_output(f"GUI: Disk scan finished. Populating {len(disks_data)} suitable disk(s).")
-        self.disk_combo.clear()
-        if disks_data:
-            for path_key, info_dict in sorted(disks_data.items()): # Sort by path
-                display_text = f"{path_key} - {info_dict.get('model', 'N/A')} ({info_dict.get('size', 'N/A')})"
-                self.disk_combo.addItem(display_text, userData=path_key) # Store path in userData
-        else:
-            self.update_log_output("GUI: No suitable disks found by scan.", "WARN")
-        self.scan_disks_button.setEnabled(True) # Re-enable button
+        self.worker_thread = WorkerThread(self.config)
+        self.worker_thread.progress_updated.connect(self.install_page.log_message)
+        self.worker_thread.installation_finished.connect(self.install_page.installation_complete)
+        self.worker_thread.start()
 
-    @pyqtSlot(str, str) # Slot for log messages from thread
-    def update_log_output(self, message: str, level: str = "INFO"):
-        """Appends a message to the GUI log view, adding a level prefix."""
-        prefix = "" if level == "INFO" else f"[{level}] "
-        self.log_output.append(prefix + message)
-        self.log_output.ensureCursorVisible() # Auto-scroll
-        # Only process events for non-debug messages to avoid lag
-        if level not in ["DEBUG", "CMD_OUT", "CMD_ERR", "CMD"]: 
-             QApplication.processEvents()
-
-    def gather_settings_and_create_config_objects(self) -> Optional[Dict[str, Any]]:
-        """
-        Gathers settings from GUI, validates them, and attempts to create the
-        necessary archinstall configuration objects.
-        Returns a dictionary of config objects/values if successful, None otherwise.
-
-        !!! CRITICAL USER IMPLEMENTATION AREA !!!
-        Replace placeholder object creations with actual ones based on archinstall API.
-        """
-        self.update_log_output("Gathering settings and creating archinstall config objects...")
-        config_objects: Dict[str, Any] = {}
-        # --- Disk ---
-        selected_disk_index = self.disk_combo.currentIndex()
-        if selected_disk_index < 0: QMessageBox.warning(self, "Input Error", "Please select a target disk."); return None
-        target_disk_path_str = self.disk_combo.itemData(selected_disk_index)
-        if not target_disk_path_str: QMessageBox.warning(self, "Input Error", "Invalid disk selected."); return None
-        target_disk_path = Path(target_disk_path_str) 
-        wipe_disk_flag = self.wipe_disk_checkbox.isChecked()
-        config_objects["target_disk_path"] = target_disk_path # Store for reference if needed
-
-        # --- System & User ---
-        hostname = self.hostname_input.text().strip()
-        username = self.username_input.text().strip()
-        password = self.password_input.text() 
-        locale_str = self.locale_input.text().strip()
-        kb_layout = self.kb_layout_input.text().strip()
-        timezone = self.timezone_input.text().strip()
-        
-        # --- Validation ---
-        if not all([hostname, username, password, locale_str, kb_layout, timezone]):
-            QMessageBox.warning(self, "Input Error", "Please fill all System & User fields."); return None
-
-        # --- Profile & Packages ---
-        profile_name = DEFAULT_DESKTOP_ENVIRONMENT_PROFILE 
-        additional_packages = []
-        for cat_name, checkbox_widget in self.app_category_checkboxes.items():
-            if checkbox_widget.isChecked():
-                additional_packages.extend(APP_CATEGORIES.get(cat_name, []))
-        base_essentials = ["sudo", "nano"] 
-        additional_packages = list(set(additional_packages + base_essentials))
-        
-        # Store simple values directly in the config dict for the thread
-        config_objects["hostname"] = hostname
-        config_objects["root_pw"] = password # User password is used for root
-        config_objects["timezone"] = timezone
-        config_objects["kernels"] = ['linux'] 
-        config_objects["ntp_enabled"] = True
-        config_objects["swap_enabled"] = True 
-        config_objects["additional_packages"] = additional_packages
-        config_objects["profile_name"] = profile_name # Store for logging/reference
-
-        # --- Create Configuration Objects (Critical Section) ---
-        try:
-            if not ARCHINSTALL_LIBRARY_AVAILABLE:
-                 raise ArchinstallError("Cannot create config objects, library not loaded.")
-                 
-            is_efi = SysInfo.has_uefi()
-            config_objects["bootloader"] = models.Bootloader.SystemdBoot if is_efi else models.Bootloader.Grub
-            
-            # 1. LocaleConfiguration
-            self.log("TODO: Verify/Implement archinstall.lib.locale.LocaleConfiguration instantiation.", "WARN")
-            config_objects['locale_config'] = locale.LocaleConfiguration(
-                kb_layout=kb_layout, sys_lang=locale_str, sys_enc='UTF-8' )
-            
-            # 2. User list
-            self.log("TODO: Verify/Implement archinstall.lib.models.User instantiation.", "WARN")
-            config_objects['user_list'] = [ models.User(username, password, sudo=True) ]
-            
-            # 3. ProfileConfiguration for KDE
-            self.log(f"TODO: Verify/Implement archinstall.lib.models.ProfileConfiguration for '{profile_name}'.", "WARN")
-            # Import the actual KdeProfile class (ensure import at top works)
-            kde_profile_instance = KdeProfile() # Check KdeProfile constructor args
-            config_objects['profile_config'] = models.ProfileConfiguration(profile=kde_profile_instance)
-
-            # 4. DiskLayoutConfiguration (Most Complex)
-            self.log("TODO: Verify/Implement archinstall.lib.disk.DiskLayoutConfiguration instantiation.", "CRITICAL")
-            if wipe_disk_flag:
-                config_objects['disk_config'] = disk.DiskLayoutConfiguration(
-                     config_type=disk.DiskLayoutType.Default, # Verify
-                     device=target_disk_path, 
-                     wipe=True,
-                     fs_type=disk.FilesystemType('ext4') # Verify
-                )
-            else:
-                config_objects['disk_config'] = disk.DiskLayoutConfiguration(
-                    config_type=disk.DiskLayoutType.Pre_mount # Verify
-                    # Needs mountpoints dict for pre-mount
-                )
-
-            # 5. Optional Configurations 
-            config_objects['disk_encryption'] = None 
-            # config_objects['network_config'] = models.NetworkConfiguration(...) 
-            # config_objects['audio_config'] = models.AudioConfiguration(...)
-
-            self.update_log_output("Successfully created configuration objects (Check TODOs!).", "INFO")
-            return config_objects # Return the dictionary of created objects
-
-        except ImportError as e:
-             self.update_log_output(f"Import Error creating config objects: {e}", "ERROR"); return None
-        except Exception as e: 
-            self.update_log_output(f"Error creating config objects: {e}", "ERROR")
-            self.update_log_output(traceback.format_exc(), "ERROR")
-            QMessageBox.critical(self, "Configuration Error", f"Failed to create installation configuration objects: {e}\n\nCheck archinstall API/version and TODO comments.")
-            return None
-
-
-    def start_installation(self):
-        """Gathers settings, creates config objects, confirms, and starts thread."""
-        if not ARCHINSTALL_LIBRARY_AVAILABLE:
-             QMessageBox.critical(self, "Error", "Archinstall library not loaded."); return
-
-        config_objects = self.gather_settings_and_create_config_objects()
-        if not config_objects:
-             self.update_log_output("Configuration failed. Installation aborted.", "ERROR"); return 
-
-        # Confirmation Dialog
-        try: # Safely get values for confirmation
-             target_disk_path_for_dialog = str(config_objects.get('disk_config').device) # Example
-             wipe_disk_val = config_objects.get('disk_config').wipe # Example
-             profile_name_for_dialog = config_objects.get('profile_name', 'N/A')
-        except Exception:
-             target_disk_path_for_dialog = self.disk_combo.itemData(self.disk_combo.currentIndex()) or "N/A"
-             wipe_disk_val = self.wipe_disk_checkbox.isChecked()
-             profile_name_for_dialog = DEFAULT_DESKTOP_ENVIRONMENT_PROFILE
-             self.update_log_output("Using fallback values for confirmation dialog.", "WARN")
-
-        wipe_warning = "YES (ENTIRE DISK WILL BE ERASED!)" if wipe_disk_val else "NO (Advanced - Using existing partitions)"
-        confirm_msg = (f"Ready to install Mai Bloom OS ({profile_name_for_dialog}) using the archinstall library:\n\n"
-                       f"  - Target Disk: {target_disk_path_for_dialog}\n"
-                       f"  - Wipe Disk & Auto-Configure: {wipe_warning}\n\n"
-                       "Ensure all selections are correct.\nPROCEED WITH INSTALLATION?")
-        
-        reply = QMessageBox.question(self, 'Confirm Installation', confirm_msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.No: self.update_log_output("Installation cancelled by user."); return
-
-        self.install_button.setEnabled(False); self.scan_disks_button.setEnabled(False)
-        self.log_output.clear(); self.update_log_output("Starting installation via archinstall library...")
-
-        # Create thread, passing the dictionary of created config objects
-        self.installer_thread = InstallerEngineThread(config_objects) 
-        self.installer_thread.installation_log.connect(self.update_log_output_slot) # Connect signal
-        self.installer_thread.installation_finished.connect(self.on_installation_finished) # Connect signal
-        self.installer_thread.start() 
-
-    @pyqtSlot(bool, str) # Define slot signature
-    def on_installation_finished(self, success: bool, message: str):
-        """Slot to handle completion signal from the installer thread."""
-        self.update_log_output(f"GUI: Installation finished signal. Success: {success}")
-        if success:
-            QMessageBox.information(self, "Installation Complete", message + "\nYou may now reboot.")
-        else:
-            log_content = self.log_output.toPlainText(); last_log_lines = "\n".join(log_content.splitlines()[-20:])
-            detailed_message = f"{message}\n\nLast log entries:\n---\n{last_log_lines}\n---"
-            QMessageBox.critical(self, "Installation Failed", detailed_message)
-            
-        self.install_button.setEnabled(True); self.scan_disks_button.setEnabled(True)
-        self.installer_thread = None 
-        self.attempt_unmount() # Attempt unmount after job is done
-
-    def attempt_unmount(self):
-        """Attempts to unmount the target MOUNT_POINT."""
-        # ... (implementation from previous response) ...
-        try:
-             mount_point = MOUNT_POINT 
-             mount_check = subprocess.run(['findmnt', str(mount_point)], capture_output=True, text=True)
-             if mount_check.returncode == 0: 
-                 self.update_log_output(f"Attempting final unmount of {mount_point}...")
-                 unmount_process = subprocess.run(["umount", "-R", str(mount_point)], capture_output=True, text=True, check=False)
-                 if unmount_process.returncode == 0: self.update_log_output(f"Successfully unmounted {mount_point}.")
-                 elif "not mounted" not in (unmount_process.stderr or "").lower(): self.update_log_output(f"Warning: Could not unmount {mount_point}: {unmount_process.stderr.strip()}", "WARN")
-                 else: self.update_log_output(f"{mount_point} was not mounted.", "DEBUG")
-        except Exception as e: self.update_log_output(f"Error during final unmount attempt: {e}", "WARN")
-
-    def select_post_install_script(self): pass # Placeholder
-    def closeEvent(self, event): # Placeholder - Copied from previous
-        if self.installer_thread and self.installer_thread.isRunning():
-            reply = QMessageBox.question(self, 'Installation in Progress', "Installation running. Exit anyway?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+    def cancel_installation(self):
+        if self.worker_thread and self.worker_thread.isRunning():
+            reply = QMessageBox.question(self, 'Cancel Installation',
+                                       "Are you sure you want to cancel the installation? This might leave the system in an inconsistent state.",
+                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply == QMessageBox.Yes:
-                if hasattr(self.installer_thread, 'stop'): self.installer_thread.stop()
-                self.installer_thread.wait(1000) 
-                event.accept()
-            else: event.ignore()
-        else: event.accept()
+                self.worker_thread.stop()
+                self.install_page.log_message("Installation cancellation requested by user.")
+                self.install_page.cancel_button.setEnabled(False) # Prevent multiple clicks
+                # Note: Stopping archinstall abruptly can be risky. WorkerThread.stop() just sets a flag.
+                # Archinstall's Installer has an abort() method which is better.
+                # This is a simple implementation.
 
+    def closeEvent(self, event):
+        if self.worker_thread and self.worker_thread.isRunning():
+            reply = QMessageBox.question(self, 'Exit Installer',
+                                       "Installation is in progress. Are you sure you want to exit? This may corrupt the installation.",
+                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.worker_thread.stop() # Attempt to stop gracefully
+                event.accept()
+            else:
+                event.ignore()
+        else:
+            event.accept()
+
+
+def check_root():
+    """Check if the script is run as root."""
+    return os.geteuid() == 0
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-    if not check_root():
-        logging.error("Application must be run as root.")
-        app_temp = QApplication.instance();
-        if not app_temp: app_temp = QApplication(sys.argv)
-        QMessageBox.critical(None, "Root Access Required", "This installer must be run with root privileges.")
-        sys.exit(1)
     app = QApplication(sys.argv)
-    installer_gui = MaiBloomInstallerApp()
+    
+    # Styling (Optional - for a slightly more modern look)
+    app.setStyle("Fusion") 
+    # You can experiment with QPalette for colors to match KDE Breeze if desired
+    # For example:
+    # palette = QPalette()
+    # palette.setColor(QPalette.Window, QColor(53, 53, 53))
+    # palette.setColor(QPalette.WindowText, Qt.white)
+    # ... and so on for other roles
+    # app.setPalette(palette)
+
+    if not check_root():
+         QMessageBox.critical(None, "Root Privileges Required", 
+                                "This installer needs to be run with root privileges (e.g., using sudo).\n"
+                                "The application will now exit.")
+         sys.exit(1)
+
+    installer_gui = MaiBloomInstaller()
     installer_gui.show()
     sys.exit(app.exec_())
+
+
