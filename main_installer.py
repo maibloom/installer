@@ -2,6 +2,9 @@ import sys
 import subprocess
 import json
 import os
+import logging # Added for custom log handler
+import traceback # Added for detailed error logging
+
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QComboBox,
                              QMessageBox, QFileDialog, QTextEdit, QCheckBox,
@@ -9,12 +12,10 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 
 # --- Configuration ---
-# Define application category packages
-# You MUST customize these lists!
 APP_CATEGORIES = {
     "Daily Use": ["firefox", "vlc", "gwenview", "okular", "libreoffice-still", "ark", "kate"],
-    "Programming": ["git", "vscode", "python", "gcc", "gdb", "base-devel"], # base-devel is a group
-    "Gaming": ["steam", "lutris", "wine", "noto-fonts-cjk"], # noto-fonts-cjk for game compatibility
+    "Programming": ["git", "vscode", "python", "gcc", "gdb", "base-devel"],
+    "Gaming": ["steam", "lutris", "wine", "noto-fonts-cjk"],
     "Education": ["gcompris-qt", "kgeography", "stellarium", "kalgebra"]
 }
 
@@ -22,77 +23,158 @@ APP_CATEGORIES = {
 def check_root():
     return os.geteuid() == 0
 
-# --- Archinstall Interaction Thread (largely unchanged from previous) ---
+# --- Custom Log Handler for PyQt ---
+class QtLogHandler(logging.Handler):
+    def __init__(self, log_signal):
+        super().__init__()
+        self.log_signal = log_signal
+
+    def emit(self, record):
+        msg = self.format(record)
+        self.log_signal.emit(msg)
+
+# --- Archinstall Interaction Thread (Modified for Library Mode) ---
 class ArchinstallThread(QThread):
     installation_finished = pyqtSignal(bool, str)
     installation_log = pyqtSignal(str)
 
-    def __init__(self, config):
+    def __init__(self, config_dict):
         super().__init__()
-        self.config = config
-        # Using a temporary file for archinstall config is often more reliable
-        # than trying to set dozens of global variables in archinstall's library mode.
-        self.script_path = "/tmp/archinstall_config.json"
+        self.gui_config = config_dict # Renamed to avoid confusion with archinstall's own config objects
 
     def run(self):
         try:
-            self.installation_log.emit("Preparing archinstall configuration...")
+            self.installation_log.emit("Initializing archinstall library mode...")
 
-            with open(self.script_path, 'w') as f:
-                json.dump(self.config, f, indent=4)
+            # --- Import archinstall components ---
+            # It's crucial that these imports themselves don't trigger the circular import
+            # before we get a chance to configure things.
+            from archinstall.lib.conf import ArchConfig
+            from archinstall.lib.installer import Installer
+            from archinstall.lib.logging import logger as archinstall_logger, setup_logfile_logger # Use setup_logfile_logger for basic setup
+            
+            # Import model classes
+            from archinstall.lib.models.locale_configuration import LocaleConfiguration
+            from archinstall.lib.models.user import User
+            from archinstall.lib.models.disk_layout import DiskLayoutConfiguration
+            from archinstall.lib.models.profile import ProfileConfiguration, Profile # Main Profile class might be ProfileDefinition or similar
+            from archinstall.lib.models.network_configuration import NetworkConfiguration # Assuming this model exists
+            # Add other models as needed (e.g., for bootloader, disk encryption, etc.)
 
-            self.installation_log.emit(f"Archinstall configuration saved to {self.script_path}")
-            self.installation_log.emit(f"Full configuration:\n{json.dumps(self.config, indent=2)}")
-            self.installation_log.emit("Starting Arch Linux installation process via archinstall CLI...")
-            self.installation_log.emit("This may take a while. Please be patient.")
+            # --- 1. Setup Archinstall Logging ---
+            # Remove existing handlers from archinstall_logger if any, to avoid duplicate logs or file logs
+            for handler in list(archinstall_logger.handlers): # Iterate over a copy
+                archinstall_logger.removeHandler(handler)
+            
+            # Add our custom Qt handler
+            qt_handler = QtLogHandler(self.installation_log)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            qt_handler.setFormatter(formatter)
+            archinstall_logger.addHandler(qt_handler)
+            archinstall_logger.setLevel(logging.INFO) # Or DEBUG for more verbosity
+            self.installation_log.emit("Archinstall logging redirected to GUI.")
 
-            # Command to run archinstall with the generated configuration
-            # Add --dry-run for testing without making changes
-            # cmd = ["archinstall", "--config", self.script_path, "--silent", "--dry-run"]
-            cmd = ["archinstall", "--config", self.script_path, "--silent"]
+            # --- 2. Create and Populate ArchConfig instance ---
+            self.installation_log.emit("Populating ArchConfig for archinstall...")
+            arch_cfg = ArchConfig() # Create a new, empty config object
 
+            # Populate basic fields
+            arch_cfg.hostname = self.gui_config.get("hostname")
+            arch_cfg.timezone = self.gui_config.get("timezone")
+            arch_cfg.swap = self.gui_config.get("swap", True)
+            arch_cfg.kernels = self.gui_config.get("kernels", ["linux"])
+            arch_cfg.packages = self.gui_config.get("packages", [])
+            arch_cfg.silent = True # Crucial for non-interactive mode
+            arch_cfg.automation = True # Also important for non-interactive mode
 
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, universal_newlines=True)
-
-            # Stream stdout
-            if process.stdout:
-                for line in iter(process.stdout.readline, ''):
-                    self.installation_log.emit(line.strip())
-                process.stdout.close()
-
-            # Capture stderr
-            stderr_output = ""
-            if process.stderr:
-                stderr_output = process.stderr.read()
-                if stderr_output:
-                    self.installation_log.emit(f"Archinstall STDERR:\n{stderr_output}")
-                process.stderr.close()
-
-            ret_code = process.wait()
-
-            if ret_code == 0:
-                self.installation_log.emit("Archinstall process completed successfully.")
-                self.installation_finished.emit(True, "Arch Linux installation successful!")
+            # Locale Configuration
+            lc_data = self.gui_config.get("locale_config", {})
+            # Assuming LocaleConfiguration can be instantiated directly or has a simple constructor
+            # If LocaleConfiguration.parse_arg is safe, it can be used. Otherwise, manual:
+            arch_cfg.locale_config = LocaleConfiguration(
+                kb_layout=lc_data.get("kb_layout"),
+                sys_lang=lc_data.get("sys_lang"),
+                sys_enc=lc_data.get("sys_enc", "UTF-8") # Archinstall might default this
+            )
+            
+            # User Configuration
+            users_list = []
+            for user_d in self.gui_config.get("users", []):
+                # User model might take keyword arguments directly
+                users_list.append(User(
+                    username=user_d.get("username"),
+                    _password=user_d.get("password"), # Often internal attribute for raw password
+                    sudo=user_d.get("sudo", True)
+                ))
+            arch_cfg.users = users_list
+            
+            # Disk Configuration
+            disk_c_data = self.gui_config.get("disk_config")
+            if disk_c_data:
+                # Assuming DiskLayoutConfiguration.parse_arg was fixed and is safe to use
+                arch_cfg.disk_config = DiskLayoutConfiguration.parse_arg(disk_c_data)
+            
+            # Profile Configuration - Attempting to bypass parse_arg
+            profile_c_data = self.gui_config.get("profile_config", {}).get("profile", {})
+            main_profile_name = profile_c_data.get("main")
+            if main_profile_name:
+                # This part is highly dependent on the actual structure of Profile and ProfileConfiguration
+                # We need to create a Profile instance (or ProfileDefinition)
+                # then assign it to the ProfileConfiguration instance.
+                # Let's assume Profile takes a name/path.
+                # The 'name' of the profile usually refers to the profile script/directory name.
+                profile_instance = Profile(name=main_profile_name, path=f"/usr/lib/python{sys.version_major}.{sys.version_minor}/site-packages/archinstall/profiles/{main_profile_name}.py") # Path is a guess
+                # Then, wrap it in ProfileConfiguration
+                arch_cfg.profile_config = ProfileConfiguration(profile=profile_instance)
             else:
-                error_msg = f"Archinstall process failed with error code {ret_code}.\n{stderr_output}"
-                self.installation_log.emit(error_msg)
-                self.installation_finished.emit(False, error_msg)
+                arch_cfg.profile_config = ProfileConfiguration() # Default/empty
 
-        except FileNotFoundError:
-            err_msg = "Error: `archinstall` command not found. Is it installed and in your PATH?"
+            # EFI and Bootloader
+            arch_cfg.efi = self.gui_config.get("efi")
+            arch_cfg.bootloader = self.gui_config.get("bootloader")
+
+            # Network Configuration
+            nc_data = self.gui_config.get("network_config", {})
+            if nc_data.get("type"): # Assuming NetworkConfiguration model exists and takes 'type'
+                 arch_cfg.network_config = NetworkConfiguration(type=nc_data.get("type"))
+            else: # Default or minimal NetworkConfiguration
+                 arch_cfg.network_config = NetworkConfiguration()
+
+
+            self.installation_log.emit("ArchConfig populated.")
+            # self.installation_log.emit(f"Effective ArchConfig (partial): {vars(arch_cfg)}") # Careful with logging whole objects
+
+            # --- 3. Instantiate Installer ---
+            self.installation_log.emit("Instantiating Installer...")
+            # The Installer constructor typically takes the ArchConfig object directly
+            installer = Installer(config=arch_cfg)
+
+            # --- 4. Run Installation ---
+            self.installation_log.emit("Starting Arch Linux installation process (library mode)...")
+            # The `run()` method of the Installer should perform the whole installation.
+            # It might raise exceptions on failure.
+            installer.run() # This is the main call.
+
+            self.installation_log.emit("Archinstall library execution completed successfully.")
+            self.installation_finished.emit(True, "Arch Linux installation successful (via library mode)!")
+
+        except ImportError as e:
+            err_msg = f"ImportError during archinstall library setup: {str(e)}.\n"
+            err_msg += "This can be due to an internal archinstall issue (like a circular import not bypassed by this mode) or a problem with your archinstall environment/version."
+            err_msg += f"\nTraceback:\n{traceback.format_exc()}"
             self.installation_log.emit(err_msg)
             self.installation_finished.emit(False, err_msg)
         except Exception as e:
-            self.installation_log.emit(f"An error occurred during archinstall execution: {str(e)}")
-            self.installation_finished.emit(False, f"An unexpected error occurred: {str(e)}")
+            err_msg = f"An critical error occurred during archinstall library execution: {str(e)}"
+            err_msg += f"\nTraceback:\n{traceback.format_exc()}"
+            self.installation_log.emit(err_msg)
+            self.installation_finished.emit(False, err_msg)
         finally:
-            if os.path.exists(self.script_path):
-                try:
-                    os.remove(self.script_path)
-                except OSError as e:
-                    self.installation_log.emit(f"Warning: Could not remove temporary config file {self.script_path}: {e}")
+            # Clean up logging if necessary (remove our handler)
+            if 'qt_handler' in locals() and 'archinstall_logger' in locals():
+                archinstall_logger.removeHandler(qt_handler)
 
-
+# PostInstallThread remains the same as it deals with subprocesses after archinstall completes.
 class PostInstallThread(QThread):
     post_install_finished = pyqtSignal(bool, str)
     post_install_log = pyqtSignal(str)
@@ -100,50 +182,36 @@ class PostInstallThread(QThread):
     def __init__(self, script_path, target_mount_point="/mnt/archinstall"):
         super().__init__()
         self.script_path = script_path
-        self.target_mount_point = target_mount_point # archinstall's default mount point
+        self.target_mount_point = target_mount_point
 
     def run(self):
         if not self.script_path or not os.path.exists(self.script_path):
             self.post_install_log.emit("Post-install script not provided or not found.")
-            # Not necessarily a failure of this thread's operation if no script was intended
             self.post_install_finished.emit(True, "No post-install script executed.")
             return
-
         try:
             self.post_install_log.emit(f"Running post-installation script: {self.script_path}")
-            self.post_install_log.emit("The script should handle chrooting if necessary, or be designed to run on the new system via arch-chroot.")
-
-            # Make script executable
             subprocess.run(["chmod", "+x", self.script_path], check=True)
-
             script_basename = os.path.basename(self.script_path)
             target_script_path = os.path.join(self.target_mount_point, "tmp", script_basename)
-
             os.makedirs(os.path.join(self.target_mount_point, "tmp"), exist_ok=True)
             subprocess.run(["cp", self.script_path, target_script_path], check=True)
             self.post_install_log.emit(f"Copied post-install script to {target_script_path}")
-
-
-            chroot_script_internal_path = os.path.join("/tmp", script_basename) 
+            chroot_script_internal_path = os.path.join("/tmp", script_basename)
             cmd = ["arch-chroot", self.target_mount_point, "/bin/bash", chroot_script_internal_path]
             self.post_install_log.emit(f"Executing in chroot: {' '.join(cmd)}")
-
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, universal_newlines=True)
-
             if process.stdout:
                 for line in iter(process.stdout.readline, ''):
                     self.post_install_log.emit(line.strip())
                 process.stdout.close()
-
             stderr_output = ""
             if process.stderr:
                 stderr_output = process.stderr.read()
                 if stderr_output:
                     self.post_install_log.emit(f"Post-install script STDERR:\n{stderr_output}")
                 process.stderr.close()
-
             ret_code = process.wait()
-
             if ret_code == 0:
                 self.post_install_log.emit("Post-installation script executed successfully.")
                 self.post_install_finished.emit(True, "Post-installation script finished.")
@@ -151,13 +219,12 @@ class PostInstallThread(QThread):
                 error_msg = f"Post-installation script failed with error code {ret_code}.\n{stderr_output}"
                 self.post_install_log.emit(error_msg)
                 self.post_install_finished.emit(False, error_msg)
-
         except FileNotFoundError:
             err_msg = "Error: `arch-chroot` command not found or script copy failed. Is `arch-install-scripts` installed?"
             self.post_install_log.emit(err_msg)
             self.post_install_finished.emit(False, err_msg)
         except Exception as e:
-            self.post_install_log.emit(f"Error running post-install script: {str(e)}")
+            self.post_install_log.emit(f"Error running post-install script: {str(e)}\n{traceback.format_exc()}")
             self.post_install_finished.emit(False, f"Error running post-install script: {str(e)}")
         finally:
             if 'target_script_path' in locals() and os.path.exists(target_script_path):
@@ -168,11 +235,10 @@ class PostInstallThread(QThread):
                     self.post_install_log.emit(f"Warning: Could not remove temporary script {target_script_path}: {e}")
 
 
-# --- Main Application Window ---
 class MaiBloomInstallerApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.archinstall_config = {}
+        self.archinstall_config_dict = {} # Changed name to reflect it's a dictionary for the GUI
         self.post_install_script_path = ""
         self.init_ui()
 
@@ -386,12 +452,12 @@ class MaiBloomInstallerApp(QWidget):
         if selected_disk_index < 0: 
             QMessageBox.warning(self, "Input Error", "Please select a target disk after scanning.")
             return
-        disk = self.disk_combo.itemData(selected_disk_index) 
+        disk_path = self.disk_combo.itemData(selected_disk_index) # Renamed to disk_path
 
-        profile = self.profile_combo.currentText()
+        profile_name = self.profile_combo.currentText() # Renamed to profile_name
         wipe_disk = self.wipe_disk_checkbox.isChecked()
 
-        if not all([hostname, username, password, locale, kb_layout, disk, timezone]):
+        if not all([hostname, username, password, locale, kb_layout, disk_path, timezone]):
             QMessageBox.warning(self, "Input Error", "Please fill in all required system and user fields.")
             return
 
@@ -400,12 +466,12 @@ class MaiBloomInstallerApp(QWidget):
             return
 
         # --- Confirmation ---
-        confirm_msg = (f"This will install Mai Bloom OS on <b>{disk}</b> with hostname <b>{hostname}</b>.\n"
-                       f"Profile: <b>{profile}</b>.\n")
+        confirm_msg = (f"This will install Mai Bloom OS on <b>{disk_path}</b> with hostname <b>{hostname}</b>.\n"
+                       f"Profile: <b>{profile_name}</b>.\n")
         if wipe_disk:
-            confirm_msg += f"<b>ALL DATA ON {disk} WILL BE ERASED and the disk will be auto-partitioned!</b>\n"
+            confirm_msg += f"<b>ALL DATA ON {disk_path} WILL BE ERASED and the disk will be auto-partitioned!</b>\n"
         else:
-            confirm_msg += f"<b>The disk {disk} will NOT be wiped. You must have compatible pre-existing partitions. This is an ADVANCED option.</b>\n"
+            confirm_msg += f"<b>The disk {disk_path} will NOT be wiped. You must have compatible pre-existing partitions. This is an ADVANCED option.</b>\n"
         confirm_msg += "Are you sure you want to proceed?"
 
         reply = QMessageBox.question(self, 'Confirm Installation', confirm_msg,
@@ -417,59 +483,51 @@ class MaiBloomInstallerApp(QWidget):
 
         self.install_button.setEnabled(False)
         self.log_output.clear()
-        self.log_output.append("Starting installation preparation...")
+        self.log_output.append("Starting installation preparation for library mode...")
 
-        # --- Prepare archinstall configuration ---
-        self.archinstall_config = {
+        # --- Prepare configuration dictionary for ArchinstallThread ---
+        self.archinstall_config_dict = {
             "hostname": hostname,
             "locale_config": {
                 "kb_layout": kb_layout,
-                "sys_enc": "UTF-8",
+                "sys_enc": "UTF-8", # Usually UTF-8
                 "sys_lang": locale
             },
             "timezone": timezone,
-            "bootloader": "systemd-boot", # Will be adjusted by EFI detection later
-            "efi": True,                  # Will be adjusted by EFI detection later
-            "swap": True,
-            "profile_config": {
-                "profile": {"main": profile}
-            },
+            "swap": True, # Let archinstall manage swap, can be made configurable
             "users": [
                 {
                     "username": username,
-                    "password": password,
+                    "password": password, 
                     "sudo": True
                 }
             ],
-            "kernels": ["linux"],
-            "network_config": {
-                "type": "nm",
-            },
-            "packages": [], # Will be populated later
-            "silent": True,
-            # "disk_config" will be added based on wipe_disk logic below
+            "kernels": ["linux"], 
+            "packages": [], # Will be populated by categories
+            # EFI and bootloader will be determined and added next
         }
 
-        # --- Define disk_config based on wipe_disk ---
+        # Disk configuration part for the dictionary
         if wipe_disk:
-            disk_configuration = {
-                "config_type": "default_layout",  # Use archinstall's default partitioning scheme
-                "device_path": disk,              # The disk to apply the layout to
-                "wipe": True                      # Confirm that the device will be wiped
+            self.archinstall_config_dict["disk_config"] = {
+                "config_type": "default_layout",
+                "device_path": disk_path,
+                "wipe": True
             }
-            self.log_output.append(f"Disk Setup: Wiping {disk} and applying default layout.")
         else:
-            # User intends to use pre-existing partitions.
-            # Archinstall should not perform layout operations.
-            # NOTE: For a silent install, 'mount_points' would typically need to be
-            # explicitly defined elsewhere in the config for this to work reliably.
-            # This GUI does not currently collect that information.
-            disk_configuration = {
-                "config_type": "manual_partitioning" # Signals that partitioning is handled manually/externally
+            self.archinstall_config_dict["disk_config"] = {
+                "config_type": "manual_partitioning"
             }
-            self.log_output.append(f"Disk Setup: Using pre-existing partitions on {disk}. Ensure mount points are configured if needed by archinstall.")
+        
+        # Profile configuration for the dictionary
+        if profile_name:
+             self.archinstall_config_dict["profile_config"] = {
+                 "profile": {"main": profile_name}
+             }
 
-        self.archinstall_config["disk_config"] = disk_configuration
+        # Network configuration (defaulting to NetworkManager)
+        self.archinstall_config_dict["network_config"] = {"type": "nm"}
+
 
         # Add packages from selected categories
         selected_packages = []
@@ -477,26 +535,23 @@ class MaiBloomInstallerApp(QWidget):
             if checkbox.isChecked():
                 selected_packages.extend(APP_CATEGORIES[category])
         if selected_packages:
-            self.archinstall_config["packages"] = list(set(selected_packages)) # Ensure unique packages
+            self.archinstall_config_dict["packages"] = list(set(selected_packages))
 
-        # EFI/BIOS detection (simple example)
+        # EFI/BIOS detection for the dictionary
         if os.path.exists("/sys/firmware/efi"):
-            self.archinstall_config["efi"] = True
-            self.archinstall_config["bootloader"] = "systemd-boot" # Good default for UEFI
-            self.log_output.append("UEFI system detected. Using systemd-boot.")
+            self.archinstall_config_dict["efi"] = True
+            self.archinstall_config_dict["bootloader"] = "systemd-boot"
+            self.log_output.append("UEFI system detected. Will configure for systemd-boot.")
         else:
-            self.archinstall_config["efi"] = False
-            self.archinstall_config["bootloader"] = "grub" # GRUB is more common for BIOS
-            self.log_output.append("BIOS system detected (or UEFI not found). Using GRUB.")
-            # GRUB might need specific disk config for bios_boot partition if disk is GPT
-            # This can get complex. Archinstall usually handles it if 'efi' is set correctly.
+            self.archinstall_config_dict["efi"] = False
+            self.archinstall_config_dict["bootloader"] = "grub"
+            self.log_output.append("BIOS system detected (or UEFI not found). Will configure for GRUB.")
+        
+        self.log_output.append("GUI Configuration dictionary prepared:")
+        self.log_output.append(json.dumps(self.archinstall_config_dict, indent=2))
 
-
-        self.log_output.append("Configuration prepared (verify against archinstall docs):")
-        self.log_output.append(json.dumps(self.archinstall_config, indent=2))
-
-        # --- Start Archinstall in a separate thread ---
-        self.installer_thread = ArchinstallThread(self.archinstall_config)
+        # --- Start Archinstall in a separate thread using library mode ---
+        self.installer_thread = ArchinstallThread(self.archinstall_config_dict) # Pass the dict
         self.installer_thread.installation_log.connect(self.update_log)
         self.installer_thread.installation_finished.connect(self.on_installation_finished)
         self.installer_thread.start()
@@ -507,7 +562,16 @@ class MaiBloomInstallerApp(QWidget):
             QMessageBox.information(self, "Installation Complete", "Arch Linux base installation finished successfully!")
             if self.post_install_script_path:
                 self.log_output.append("\n--- Installation successful. Proceeding to post-installation script. ---")
-                self.run_post_install_script()
+                # Ensure mount point is correctly fetched if archinstall changes it (library mode might not update self.archinstall_config_dict)
+                # For now, using the default, but this might need adjustment if archinstall in lib mode exposes final mountpoint.
+                mount_point_for_post_install = "/mnt/archinstall" # Default
+                if "disk_config" in self.archinstall_config_dict and \
+                   "config_type" in self.archinstall_config_dict["disk_config"] and \
+                   self.archinstall_config_dict["disk_config"]["config_type"] == "manual_partitioning":
+                       self.log_output.append("Manual partitioning was used. Post-install script needs to be aware of user-defined mount points.")
+                # It's hard to get the dynamic mount_point from archinstall library mode without specific return or global state inspection.
+                # PostInstallThread defaults to /mnt/archinstall which is archinstall's typical mount point.
+                self.run_post_install_script(mount_point_for_post_install)
             else:
                 self.install_button.setEnabled(True)
                 self.log_output.append("No post-installation script to run. System setup complete.")
@@ -515,11 +579,9 @@ class MaiBloomInstallerApp(QWidget):
             QMessageBox.critical(self, "Installation Failed", f"Arch Linux installation failed.\nSee log for details.\n{message}")
             self.install_button.setEnabled(True)
 
-    def run_post_install_script(self):
-        self.log_output.append("\n--- Starting Post-Installation Script ---")
-        target_mount = self.archinstall_config.get("mount_point", "/mnt/archinstall")
-
-        self.post_installer_thread = PostInstallThread(self.post_install_script_path, target_mount_point=target_mount)
+    def run_post_install_script(self, target_mount_point): # Added target_mount_point argument
+        self.log_output.append(f"\n--- Starting Post-Installation Script (Target: {target_mount_point}) ---")
+        self.post_installer_thread = PostInstallThread(self.post_install_script_path, target_mount_point=target_mount_point)
         self.post_installer_thread.post_install_log.connect(self.update_log)
         self.post_installer_thread.post_install_finished.connect(self.on_post_install_finished)
         self.post_installer_thread.start()
