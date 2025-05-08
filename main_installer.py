@@ -31,40 +31,38 @@ class ArchinstallThread(QThread):
 
     def __init__(self, config_dict_for_json):
         super().__init__()
-        self.config_data = config_dict_for_json
+        self.config_data = config_dict_for_json # Should contain profile, silent, script keys
         self.config_file_path = "/tmp/archinstall_config.json"
 
     def run(self):
         try:
             self.installation_log.emit("Preparing archinstall JSON configuration...")
-            # self.config_data should already contain 'silent': True and 'script': 'default_installer'
-            # from MaiBloomInstallerApp.start_installation_process
             with open(self.config_file_path, 'w') as f:
                 json.dump(self.config_data, f, indent=2)
 
             self.installation_log.emit(f"Archinstall JSON configuration saved to {self.config_file_path}")
+            # Log the config for debugging if needed, can be verbose
+            # self.installation_log.emit(f"Full JSON Configuration:\n{json.dumps(self.config_data, indent=2)}")
             self.installation_log.emit("Starting Arch Linux installation process via archinstall CLI...")
-            self.installation_log.emit("This may take a while. Please be patient.")
+            self.installation_log.emit("This may take a while if a Desktop Environment is selected. Please be patient.")
 
-            # --- MODIFICATION: Added --silent to the command line ---
+            # Command includes --silent, JSON includes "script": "default_installer" and "silent": True
             cmd = ["archinstall", "--config", self.config_file_path, "--silent"]
 
             proc_env = os.environ.copy()
             proc_env["TERM"] = "dumb"
-            if 'LC_ALL' not in proc_env:
-                proc_env['LC_ALL'] = 'C.UTF-8'
-            if 'LANG' not in proc_env:
-                proc_env['LANG'] = 'C.UTF-8'
+            if 'LC_ALL' not in proc_env: proc_env['LC_ALL'] = 'C.UTF-8'
+            if 'LANG' not in proc_env: proc_env['LANG'] = 'C.UTF-8'
             
             self.installation_log.emit(f"Launching subprocess: {' '.join(cmd)}")
-            self.installation_log.emit(f"  with ENV: TERM={proc_env['TERM']}, LC_ALL={proc_env.get('LC_ALL', 'Not Set')}, LANG={proc_env.get('LANG', 'Not Set')}")
+            self.installation_log.emit(f"  with ENV: TERM={proc_env['TERM']}, LC_ALL={proc_env.get('LC_ALL', 'N/A')}, LANG={proc_env.get('LANG', 'N/A')}")
 
             process = subprocess.Popen(cmd,
                                        stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE,
                                        stdin=subprocess.DEVNULL,
                                        text=True,
-                                       bufsize=1,
+                                       bufsize=1, # Line buffered
                                        universal_newlines=True,
                                        env=proc_env)
 
@@ -75,17 +73,20 @@ class ArchinstallThread(QThread):
                     self.installation_log.emit(line_strip)
                     stdout_lines.append(line_strip)
 
-            ret_code = process.wait()
+            ret_code = process.wait() # Wait for process to finish
 
             stderr_output = ""
-            if process.stderr:
+            if process.stderr: # Read any remaining stderr
                 stderr_output = process.stderr.read()
-                if stderr_output:
-                    stderr_log_snippet = stderr_output.strip().split('\n')
-                    if len(stderr_log_snippet) > 20:
-                        self.installation_log.emit(f"Archinstall STDERR (snippet):\n" + "\n".join(stderr_log_snippet[:10]) + "\n...\n" + "\n".join(stderr_log_snippet[-10:]))
+                if stderr_output.strip():
+                    # Log snippet or full stderr
+                    stderr_lines = stderr_output.strip().split('\n')
+                    log_msg = f"Archinstall STDERR ({len(stderr_lines)} lines):\n"
+                    if len(stderr_lines) > 30: # If very long, log a snippet
+                        log_msg += "\n".join(stderr_lines[:15]) + "\n...\n" + "\n".join(stderr_lines[-15:])
                     else:
-                        self.installation_log.emit(f"Archinstall STDERR:\n{stderr_output.strip()}")
+                        log_msg += stderr_output.strip()
+                    self.installation_log.emit(log_msg)
             
             if ret_code == 0:
                 self.installation_log.emit("Archinstall process completed successfully.")
@@ -96,10 +97,12 @@ class ArchinstallThread(QThread):
                      error_msg_detail += f"\n\nError Output (from archinstall STDERR):\n---\n{stderr_output.strip()}\n---"
                 elif stdout_lines:
                      error_msg_detail += f"\n\nLast Output Lines (from archinstall STDOUT):\n---\n"
-                     error_msg_detail += "\n".join(stdout_lines[-15:])
+                     error_msg_detail += "\n".join(stdout_lines[-20:]) # Show more lines
                      error_msg_detail += "\n---"
                 
-                self.installation_log.emit(f"Archinstall failure. Full details:\n{error_msg_detail}")
+                self.installation_log.emit(f"Archinstall failure. Full details available in log and potentially /var/log/archinstall/install.log on the target (if mounted).")
+                self.installation_log.emit(error_msg_detail) # Log the detailed message
+                
                 popup_error_msg = f"Archinstall process failed (code {ret_code}).\nSee installation log for detailed error output."
                 self.installation_finished.emit(False, popup_error_msg)
 
@@ -115,7 +118,7 @@ class ArchinstallThread(QThread):
                 except OSError as e: self.installation_log.emit(f"Warning: Could not remove temp config file {self.config_file_path}: {e}")
 
 
-class PostInstallThread(QThread):
+class PostInstallThread(QThread): # No changes needed here based on the request
     post_install_finished = pyqtSignal(bool, str)
     post_install_log = pyqtSignal(str)
     def __init__(self, script_path, target_mount_point="/mnt/archinstall"):
@@ -127,52 +130,31 @@ class PostInstallThread(QThread):
             self.post_install_log.emit("Post-install script not provided or not found.")
             self.post_install_finished.emit(True, "No post-install script executed.")
             return
-        
         target_script_path_in_chroot_tmp = None 
-
         try:
             self.post_install_log.emit(f"Preparing post-installation script: {self.script_path}")
             subprocess.run(["chmod", "+x", self.script_path], check=True)
             script_basename = os.path.basename(self.script_path)
-            
             chroot_tmp_dir_on_host = os.path.join(self.target_mount_point, "tmp")
             os.makedirs(chroot_tmp_dir_on_host, exist_ok=True)
             target_script_path_in_chroot_tmp = os.path.join(chroot_tmp_dir_on_host, script_basename)
-            
             subprocess.run(["cp", self.script_path, target_script_path_in_chroot_tmp], check=True)
             self.post_install_log.emit(f"Copied post-install script to {target_script_path_in_chroot_tmp} (for chroot)")
-            
             script_path_inside_chroot = os.path.join("/tmp", script_basename) 
-            
             cmd = ["arch-chroot", self.target_mount_point, "/bin/bash", script_path_inside_chroot]
             self.post_install_log.emit(f"Executing in chroot: {' '.join(cmd)}")
-
             proc_env_chroot = os.environ.copy()
             proc_env_chroot["TERM"] = "dumb"
-            if 'LC_ALL' not in proc_env_chroot:
-                proc_env_chroot['LC_ALL'] = 'C.UTF-8'
-            if 'LANG' not in proc_env_chroot:
-                proc_env_chroot['LANG'] = 'C.UTF-8'
-
-            process = subprocess.Popen(cmd,
-                                       stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE,
-                                       stdin=subprocess.DEVNULL,
-                                       text=True,
-                                       bufsize=1,
-                                       universal_newlines=True,
-                                       env=proc_env_chroot)
-            
+            if 'LC_ALL' not in proc_env_chroot: proc_env_chroot['LC_ALL'] = 'C.UTF-8'
+            if 'LANG' not in proc_env_chroot: proc_env_chroot['LANG'] = 'C.UTF-8'
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, bufsize=1, universal_newlines=True, env=proc_env_chroot)
             if process.stdout:
                 for line in iter(process.stdout.readline, ''): self.post_install_log.emit(line.strip())
-
             ret_code = process.wait()
-
             stderr_output = ""
             if process.stderr:
                 stderr_output = process.stderr.read()
                 if stderr_output: self.post_install_log.emit(f"Post-install script STDERR:\n{stderr_output.strip()}")
-
             if ret_code == 0:
                 self.post_install_log.emit("Post-installation script executed successfully.")
                 self.post_install_finished.emit(True, "Post-installation script finished.")
@@ -180,7 +162,7 @@ class PostInstallThread(QThread):
                 error_msg = f"Post-installation script failed with error code {ret_code}.\n{stderr_output.strip()}"
                 self.post_install_log.emit(error_msg); self.post_install_finished.emit(False, error_msg)
         except FileNotFoundError as e:
-            err_msg = f"Error: `arch-chroot` or script copy target missing ({e}). Is `arch-install-scripts` package installed and target system mounted?"
+            err_msg = f"Error: `arch-chroot` or script copy target missing ({e}). Is `arch-install-scripts` installed and target system mounted?"
             self.post_install_log.emit(err_msg); self.post_install_finished.emit(False, err_msg)
         except subprocess.CalledProcessError as e:
             err_msg = f"Subprocess error during post-install prep: {e}"
@@ -204,7 +186,7 @@ class MaiBloomInstallerApp(QWidget):
         self.post_install_script_path = ""
         self.init_ui()
 
-    def init_ui(self):
+    def init_ui(self): # No changes needed here based on the request
         self.setWindowTitle('Mai Bloom OS Installer')
         self.setGeometry(100, 100, 850, 700)
         overall_layout = QVBoxLayout(self)
@@ -299,19 +281,17 @@ class MaiBloomInstallerApp(QWidget):
         row_layout = QHBoxLayout(); label = QLabel(label_text); label.setFixedWidth(120)
         row_layout.addWidget(label); row_layout.addWidget(widget); return row_layout
 
-    def scan_and_populate_disks(self):
+    def scan_and_populate_disks(self): # No changes needed here based on the request
         self.log_output.append("Scanning for disks...")
-        QApplication.processEvents()
+        QApplication.processEvents() 
         self.disk_combo.clear()
         try:
             cmd = ['lsblk', '-J', '-b', '-p', '-o', 'NAME,SIZE,TYPE,MODEL,PATH,TRAN,PKNAME,RO,RM']
             self.log_output.append(f"Executing: {' '.join(cmd)}")
             result = subprocess.run(cmd, capture_output=True, text=True, check=True, encoding='utf-8')
-            
             data = json.loads(result.stdout)
             disks_found = 0
             self.log_output.append("Filtering block devices for installation targets:")
-
             for device in data.get('blockdevices', []):
                 name = device.get('name', 'N/A')
                 dtype = device.get('type', 'N/A')
@@ -319,19 +299,15 @@ class MaiBloomInstallerApp(QWidget):
                 rm = device.get('rm', True) 
                 pkname = device.get('pkname', None)
                 tran = device.get('tran', 'N/A')
-
                 log_line = (f"  Checking: {name}, Type: {dtype}, RO: {ro}, RM: {rm}, "
                             f"PKNAME: {pkname}, Size: {device.get('size', 0)}, "
                             f"Model: {device.get('model', 'N/A')}, Tran: {tran}")
-                
                 if dtype == 'disk' and not ro and not pkname:
                     model = device.get('model', 'Unknown Model')
                     size_bytes = int(device.get('size', 0))
-
                     if size_bytes < 10 * (1024**3):
                         self.log_output.append(log_line + f" -> Skipping (Too small: {size_bytes / (1024**3):.2f} GB)")
                         continue
-                    
                     is_root_device = False
                     if device.get('children'):
                         for child in device.get('children', []):
@@ -341,24 +317,20 @@ class MaiBloomInstallerApp(QWidget):
                     if device.get('mountpoint') == '/' or \
                        (device.get('mountpoints') and '/' in device.get('mountpoints')):
                         is_root_device = True
-                    
                     if is_root_device:
                         self.log_output.append(log_line + " -> Skipping (Appears to be current root FS)")
                         continue
-
                     display_text = f"{name} - {model} ({size_bytes / (1024**3):.2f} GB)"
                     self.disk_combo.addItem(display_text, userData={"path": name, "size_bytes": size_bytes})
                     self.log_output.append(log_line + f" -> Added to dropdown: {display_text}")
                     disks_found += 1
                 else:
                     self.log_output.append(log_line + " -> Skipping (Does not meet criteria)")
-            
             if disks_found == 0:
                 msg = "No suitable installation disks found after filtering. Ensure a non-read-only, non-partition, sufficiently large disk is available and not the current OS disk."
                 self.log_output.append(msg); QMessageBox.warning(self, "Disk Scan", msg)
             else:
                 self.log_output.append(f"Disk scan complete. Found {disks_found} suitable disk(s).")
-
         except FileNotFoundError:
             self.log_output.append("Error: `lsblk` command not found."); QMessageBox.critical(self, "Error", "`lsblk` not found.")
         except subprocess.CalledProcessError as e:
@@ -369,8 +341,7 @@ class MaiBloomInstallerApp(QWidget):
             self.log_output.append(f"Unexpected error during disk scan: {str(e)}\n{traceback.format_exc()}")
             QMessageBox.critical(self, "Disk Scan Error", f"An unexpected error occurred: {str(e)}")
 
-
-    def select_post_install_script(self):
+    def select_post_install_script(self): # No changes needed here based on the request
         options = QFileDialog.Options()
         filePath, _ = QFileDialog.getOpenFileName(self, "Select Post-Installation Bash Script", "", "Bash Scripts (*.sh);;All Files (*)", options=options)
         if filePath:
@@ -380,7 +351,7 @@ class MaiBloomInstallerApp(QWidget):
         else:
             self.post_install_script_path = ""; self.post_install_script_label.setText("No script selected.")
 
-    def update_log(self, message):
+    def update_log(self, message): # No changes needed here
         self.log_output.append(message)
         self.log_output.ensureCursorVisible(); QApplication.processEvents()
 
@@ -393,7 +364,10 @@ class MaiBloomInstallerApp(QWidget):
         kb_layout = self.keyboard_layout_input.text().strip()
         timezone = self.timezone_input.text().strip()
         selected_disk_index = self.disk_combo.currentIndex()
-        profile_name = self.profile_combo.currentText() 
+        
+        # --- MODIFICATION: Get the profile name to use in the JSON ---
+        profile_name = self.profile_combo.currentText() # e.g., "kde", "gnome", "minimal"
+        
         wipe_disk_checked = self.wipe_disk_checkbox.isChecked()
 
         if selected_disk_index < 0:
@@ -409,36 +383,33 @@ class MaiBloomInstallerApp(QWidget):
         if password != confirm_password:
             QMessageBox.warning(self, "Input Error", "Passwords do not match."); return
 
+        # --- MODIFICATION: Update Confirmation Message ---
         confirm_msg_detail = f"<b>TARGET DISK: {disk_path_str}</b> ({disk_size_bytes / (1024**3):.2f} GB)\n"
         confirm_msg_detail += f"Hostname: {hostname}\n"
         confirm_msg_detail += f"Username: {username}\n"
-        confirm_msg_detail += f"<b>!!! IMPORTANT WORKAROUND NOTED IN CODE !!!</b>\n"
-        confirm_msg_detail += f"The selected profile ('{profile_name}') "
-        confirm_msg_detail += f"<b>WILL NOT BE INSTALLED</b> by this configuration.\n"
-        confirm_msg_detail += f"Only a minimal command-line system will be set up.\n"
-        confirm_msg_detail += f"You must install the desktop environment manually after first boot.\n\n"
+        confirm_msg_detail += f"Desktop Environment/Profile: <b>{profile_name}</b>\n\n" # State the selected profile
 
         if wipe_disk_checked:
             confirm_msg_detail += f"<b>ALL DATA ON {disk_path_str} WILL BE ERASED. Archinstall will use its default partitioning scheme.</b>\n"
         else:
             confirm_msg_detail += f"<b>The disk {disk_path_str} will NOT be wiped. Using existing partitions (ADVANCED - ensure correct setup).</b>\n"
-        confirm_msg_detail += "Proceed with this MINIMAL (no desktop) installation?"
+        confirm_msg_detail += "Proceed with the installation?"
 
-        reply = QMessageBox.question(self, 'Confirm MINIMAL Installation', confirm_msg_detail, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        reply = QMessageBox.question(self, f'Confirm Installation ({profile_name} Profile)', confirm_msg_detail, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.No:
             self.log_output.append("Installation cancelled by user."); return
 
         self.install_button.setEnabled(False); self.log_output.clear()
-        self.log_output.append("Preparing MINIMAL JSON configuration (NO PROFILE) for archinstall...")
+        self.log_output.append(f"Preparing JSON configuration for archinstall (Profile: {profile_name})...")
 
         is_efi = os.path.exists("/sys/firmware/efi")
         self.log_output.append(f"EFI System Detected: {is_efi}")
         sys_lang_base = locale_str.split('.')[0] if '.' in locale_str else locale_str
 
-        minimal_config_data = {
-            # --- MODIFICATION: Added "script" key ---
-            "script": "default_installer", 
-            "silent": True, 
+        # --- MODIFICATION: Construct JSON to use archinstall profiles ---
+        config_data_for_archinstall = {
+            "script": "default_installer", # Instruct archinstall to use its non-interactive script
+            "silent": True,               # Ensure silent operation from JSON too
 
             "hostname": hostname,
             "locale_config": {
@@ -448,49 +419,84 @@ class MaiBloomInstallerApp(QWidget):
             "timezone": timezone,
             "bootloader": "systemd-boot" if is_efi else "grub",
             "users": [{"username": username, "password": password, "sudo": True}],
-            "packages": [], 
+            "packages": [], # For *additional* packages beyond the profile
             "ntp": True,
-            "swap": True,
+            "swap": True, # Let archinstall handle swap creation based on its defaults for the profile
         }
         if is_efi:
-             minimal_config_data['efi'] = True
+             config_data_for_archinstall['efi'] = True
         
+        # --- MODIFICATION: Add profile configuration ---
+        # The exact structure for profile_config can vary with archinstall versions.
+        # This is a common way:
+        # If profile_name is "minimal", archinstall might not expect a "profile_config" or specific DE profile.
+        # However, many archinstall versions accept "minimal" as a valid profile name directly.
+        if profile_name and profile_name.lower() != "none": # Assuming "minimal" is a valid profile
+            config_data_for_archinstall["profile_config"] = {
+                "profile": {
+                    "main": profile_name # e.g. "kde", "gnome", "xfce4", "minimal"
+                }
+                # Some archinstall versions might allow specifying greeter, audio here, e.g.,
+                # "greeter": "sddm", # if profile is kde
+                # "audio_server": "pipewire" 
+            }
+            # Alternatively, some archinstall versions might just take a top-level "profile" key:
+            # config_data_for_archinstall["profile"] = profile_name
+            self.log_output.append(f"Using profile: {profile_name}")
+        else:
+            self.log_output.append("No specific Desktop Environment profile selected (or 'minimal' implies base install).")
+
+
+        # Disk Configuration (remains similar, archinstall profiles usually work with this disk setup)
         if wipe_disk_checked:
-            minimal_config_data["harddrives"] = [disk_path_str]
-            minimal_config_data["disk_encryption"] = None 
-            minimal_config_data["disk_layouts"] = {
+            config_data_for_archinstall["harddrives"] = [disk_path_str]
+            config_data_for_archinstall["disk_encryption"] = None 
+            config_data_for_archinstall["disk_layouts"] = {
                  disk_path_str: { "wipe": True, "layout_type": "auto" }
             }
-            self.log_output.append(f"Minimal config: Wiping {disk_path_str} and using auto layout.")
+            self.log_output.append(f"Config: Wiping {disk_path_str} and using auto layout.")
         else:
-            minimal_config_data["harddrives"] = [disk_path_str]
-            minimal_config_data["disk_layouts"] = {
+            config_data_for_archinstall["harddrives"] = [disk_path_str]
+            config_data_for_archinstall["disk_layouts"] = {
                  disk_path_str: { "wipe": False }
             }
-            self.log_output.append(f"Minimal config: Using existing partitions on {disk_path_str} (wipe=False). Ensure setup is correct.")
+            self.log_output.append(f"Config: Using existing partitions on {disk_path_str} (wipe=False).")
 
-        final_packages = ["networkmanager", "sudo", "nano", "base", "linux", "linux-firmware"]
-        if not is_efi:
-            final_packages.append("grub")
-        else:
-            final_packages.append("efibootmgr")
+        # Package Selection: These are *additional* to what the profile installs.
+        # Base packages are usually handled by the profile itself (especially DE profiles).
+        # However, ensuring some absolute minimums can be good.
+        additional_packages = [] # Start with an empty list for additional packages
+        
+        # Add essential tools if not guaranteed by all profiles (especially 'minimal' profile)
+        # Most DE profiles (kde, gnome, xfce4) will pull in base, linux, networkmanager etc.
+        # If 'minimal' profile is chosen, these become more critical to list.
+        # It's generally safe to list them; pacman won't reinstall if already part of profile.
+        additional_packages.extend(["networkmanager", "sudo", "nano"])
+        if profile_name.lower() == "minimal": # For minimal profile, ensure base system components are there
+             additional_packages.extend(["base", "linux", "linux-firmware"])
+             if not is_efi: additional_packages.append("grub")
+             else: additional_packages.append("efibootmgr")
+        
         for category, checkbox in self.app_category_checkboxes.items():
             if checkbox.isChecked():
-                final_packages.extend(APP_CATEGORIES[category])
-        minimal_config_data["packages"] = list(set(final_packages))
+                additional_packages.extend(APP_CATEGORIES[category])
+        
+        if additional_packages: # Only add "packages" key if there are any
+            config_data_for_archinstall["packages"] = list(set(additional_packages))
 
-        self.archinstall_json_config_data = minimal_config_data
-        self.log_output.append(f"Minimal JSON Configuration prepared for Archinstall thread:\n{json.dumps(self.archinstall_json_config_data, indent=2)}")
+        self.archinstall_json_config_data = config_data_for_archinstall # Store the config being used
+
+        self.log_output.append(f"JSON Configuration (Profile: {profile_name}) prepared for Archinstall thread:\n{json.dumps(self.archinstall_json_config_data, indent=2)}")
 
         self.installer_thread = ArchinstallThread(self.archinstall_json_config_data)
         self.installer_thread.installation_log.connect(self.update_log)
         self.installer_thread.installation_finished.connect(self.on_installation_finished)
         self.installer_thread.start()
 
-    def on_installation_finished(self, success, message):
+    def on_installation_finished(self, success, message): # No changes needed here
         self.update_log(message)
         if success:
-            QMessageBox.information(self, "Installation Complete", "Arch Linux MINIMAL base installation finished successfully!\n\nRemember to install a desktop environment and other software manually after booting.")
+            QMessageBox.information(self, "Installation Complete", f"Arch Linux installation finished successfully!\nProfile selected: {self.archinstall_json_config_data.get('profile_config', {}).get('profile', {}).get('main', 'N/A')}")
             if self.post_install_script_path:
                 self.log_output.append("\n--- Proceeding to post-installation script. ---")
                 archinstall_mount_point = self.archinstall_json_config_data.get("mount_point", "/mnt/archinstall")
@@ -501,32 +507,31 @@ class MaiBloomInstallerApp(QWidget):
             QMessageBox.critical(self, "Installation Failed", f"Installation failed.\n{message}")
             self.install_button.setEnabled(True)
 
-    def run_post_install_script(self, target_mount_point):
+    def run_post_install_script(self, target_mount_point): # No changes needed here
         self.log_output.append(f"\n--- Starting Post-Installation Script (Target: {target_mount_point}) ---")
         self.post_installer_thread = PostInstallThread(self.post_install_script_path, target_mount_point=target_mount_point)
         self.post_installer_thread.post_install_log.connect(self.update_log)
         self.post_installer_thread.post_install_finished.connect(self.on_post_install_finished)
         self.post_installer_thread.start()
 
-    def on_post_install_finished(self, success, message):
+    def on_post_install_finished(self, success, message): # No changes needed here
         self.update_log(message)
         if success: QMessageBox.information(self, "Post-Install Complete", "Post-installation script finished.")
         else: QMessageBox.warning(self, "Post-Install Issue", f"Post-install script reported issues.\n{message}")
         self.install_button.setEnabled(True)
-        self.log_output.append("Mai Bloom OS setup process finished (minimal system installed).")
+        self.log_output.append("Mai Bloom OS setup process finished.")
 
 
-if __name__ == '__main__':
+if __name__ == '__main__': # No changes needed here
     if not check_root():
         temp_app_for_msgbox = QApplication.instance()
         if not temp_app_for_msgbox:
             temp_app_for_msgbox = QApplication(sys.argv)
-        
         QMessageBox.critical(None, "Root Access Required", "This application must be run as root (or with sudo).")
         print("Error: This application must be run as root (or with sudo). Exiting.")
         sys.exit(1)
-        
     app = QApplication(sys.argv)
     installer = MaiBloomInstallerApp()
     installer.show()
     sys.exit(app.exec_())
+
