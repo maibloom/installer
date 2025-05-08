@@ -1,10 +1,8 @@
 import sys
-import subprocess
-import json
-import os
-import logging # Not used, but was imported
+import os # For environment variables if needed by archinstall internals
 import traceback
-from pathlib import Path # Not used, but was imported
+import time # For demonstration of thread activity
+from pathlib import Path # archinstall often uses Path objects
 
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QComboBox,
@@ -12,526 +10,483 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QGroupBox, QGridLayout, QSplitter)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 
-# --- Configuration ---
-APP_CATEGORIES = {
+# --- Attempt to import archinstall components ---
+# This is where you'll face the first hurdle. You need to figure out
+# which core components of archinstall to import.
+# These are HYPOTHETICAL import paths and names. You MUST find the real ones.
+try:
+    # Example: A central installer class or main module
+    # from archinstall import Installer, run_as_a_module # Hypothetical entry points
+    # from archinstall.lib import global_variables # Often used for settings
+    # from archinstall.lib import disk # For disk operations
+    # from archinstall.lib import lvm, luks # For LVM, LUKS
+    # from archinstall.lib import packages # For pacstrap, package management
+    # from archinstall.lib import profile # For profile handling
+    # from archinstall.lib import systemd # For service management
+    # from archinstall.lib import user # For user creation
+    # from archinstall.lib import locale_helpers # For locale, keyboard
+    # from archinstall.lib import bootloader # For bootloader setup
+    # from archinstall.lib.exceptions import ArchinstallError, UserInteractionRequired # Hypothetical
+    
+    # A very common pattern in archinstall is to modify its global settings dictionary.
+    # Let's assume `archinstall.lib.global_variables.storage` exists and is this dictionary.
+    # import archinstall.lib.global_variables as glob_vars # Hypothetical alias
+    # glob_vars.storage = {} # Initialize or get a reference to the global settings
+
+    ARCHINSTALL_LIBRARY_AVAILABLE = True
+    # You might need to initialize parts of archinstall here if it expects certain globals
+    # or a specific environment setup when its modules are imported.
+    # For example, archinstall.init_logging(silent=True) or similar.
+
+    # Placeholder for actual archinstall modules/classes after user research
+    class ArchinstallDiskModulePlaceholder:
+        def get_disks(self):
+            # TODO: Replace with actual archinstall call to list disks
+            # e.g., return disk.all_disks() or similar
+            self.log_signal.emit("Placeholder: Simulating disk scan...")
+            time.sleep(0.5)
+            return {
+                "/dev/sda": {"model": "Virt-IO HD", "size": "20G"},
+                "/dev/sdb": {"model": "Another Disk", "size": "50G"},
+            }
+        
+        def prepare_disk_layout(self, config, log_callback):
+            # TODO: User needs to find archinstall functions for:
+            # 1. Wiping disk (if selected) e.g., disk.wipe_ urządzenie(config['device'])
+            # 2. Creating partitions (e.g., disk.GPT.create_efi_partition, .create_swap_partition, .create_root_partition)
+            #    This will depend heavily on the chosen layout (auto vs manual hints from GUI)
+            # 3. Formatting partitions (e.g., disk.mkfs_ext4(partition_path))
+            # 4. Mounting partitions (e.g., disk.mount_filesystems(layout_config, Path('/mnt/archinstall')))
+            log_callback(f"Placeholder: Preparing disk layout for {config.get('target_disk_path')}")
+            log_callback(f"  with options: {config.get('partitioning_options')}")
+            log_callback(f"  Wipe disk: {config.get('wipe_disk')}")
+            # This step is CRITICAL and highly complex.
+            # archinstall.Installer()._custom_partitioning() or similar might be a starting point to look at.
+            # It might involve creating a disk layout object and then applying it.
+            time.sleep(2)
+            log_callback("Placeholder: Disk layout prepared and mounted at /mnt/archinstall.")
+            return Path("/mnt/archinstall") # Return the mount point
+
+    class ArchinstallPackageManagerPlaceholder:
+        def __init__(self, mount_point, log_callback):
+            self.mount_point = mount_point
+            self.log_callback = log_callback
+
+        def install_profile_and_packages(self, profile_name, additional_packages):
+            # TODO: User needs to find archinstall functions for:
+            # 1. Selecting/loading the profile (e.g., profile.get_profile(profile_name))
+            # 2. Getting the package list from the profile.
+            # 3. Running pacstrap (e.g., packages.pacstrap(self.mount_point, profile_packages + additional_packages))
+            self.log_callback(f"Placeholder: Installing profile '{profile_name}' and {len(additional_packages)} additional packages to {self.mount_point}.")
+            # Example:
+            # profile_obj = profile.get_profile(profile_name)
+            # if not profile_obj: raise ArchinstallError(f"Profile {profile_name} not found.")
+            # packages_to_install = profile_obj.packages_to_install() # Hypothetical
+            # packages_to_install.extend(additional_packages)
+            # packages.pacstrap(self.mount_point, list(set(packages_to_install)))
+            time.sleep(5) # Simulate long package installation
+            self.log_callback("Placeholder: Packages and profile installed.")
+
+    class ArchinstallSystemConfigurerPlaceholder:
+        def __init__(self, mount_point, log_callback):
+            self.mount_point = mount_point
+            self.log_callback = log_callback
+
+        def configure_system(self, config):
+            # TODO: User needs to find archinstall functions for (these run IN CHROOT):
+            # 1. genfstab: Often a direct call within the installer logic.
+            # 2. Set hostname: e.g., archinstall.set_hostname(config['hostname']) but via chroot.
+            #    Might be: installer_instance.chroot_execute(['hostnamectl', 'set-hostname', config['hostname']])
+            # 3. Set locale/keyboard: e.g., locale_helpers.set_locale_and_keyboard(...)
+            # 4. Set timezone: e.g., installer_instance.chroot_execute(...)
+            # 5. Create users: e.g., user.add_user(...)
+            # 6. Setup bootloader: e.g., bootloader.install_bootloader(config['bootloader_choice'], esp_path, root_path)
+            self.log_callback("Placeholder: Generating fstab...")
+            time.sleep(0.5)
+            self.log_callback("Placeholder: Configuring hostname, locale, timezone...")
+            time.sleep(1)
+            self.log_callback(f"Placeholder: Creating user {config.get('username')}...")
+            time.sleep(0.5)
+            self.log_callback(f"Placeholder: Installing and configuring bootloader ({config.get('bootloader')})...")
+            time.sleep(2)
+            self.log_callback("Placeholder: System configuration complete.")
+    
+    # Placeholder for UserInteractionRequired, if archinstall has such an exception
+    class UserInteractionRequired(Exception): pass
+    class ArchinstallError(Exception): pass
+
+
+except ImportError as e:
+    print(f"Failed to import archinstall modules: {e}", file=sys.stderr)
+    print("Please ensure archinstall is installed correctly and its modules are accessible.", file=sys.stderr)
+    print("Using archinstall as a library directly is experimental and may require specific setup.", file=sys.stderr)
+    ARCHINSTALL_LIBRARY_AVAILABLE = False
+    # Define placeholders if import fails, so GUI can still load for structure demo
+    ArchinstallDiskModulePlaceholder = type('ArchinstallDiskModulePlaceholder', (object,), {'get_disks': lambda self: {}, 'prepare_disk_layout': lambda self,c,l: Path('/mnt/archinstall_placeholder'), 'log_signal': pyqtSignal(str)})
+    ArchinstallPackageManagerPlaceholder = type('ArchinstallPackageManagerPlaceholder', (object,), {'__init__': lambda s,m,l: None, 'install_profile_and_packages': lambda s,p,a: None})
+    ArchinstallSystemConfigurerPlaceholder = type('ArchinstallSystemConfigurerPlaceholder', (object,), {'__init__': lambda s,m,l: None, 'configure_system': lambda s,c: None})
+    UserInteractionRequired = Exception
+    ArchinstallError = Exception
+
+
+# --- Configuration (App Categories, Root Check - can be reused) ---
+APP_CATEGORIES = { # Same as user's code
     "Daily Use": ["firefox", "vlc", "gwenview", "okular", "libreoffice-still", "ark", "kate"],
     "Programming": ["git", "vscode", "python", "gcc", "gdb", "base-devel"],
     "Gaming": ["steam", "lutris", "wine", "noto-fonts-cjk"],
     "Education": ["gcompris-qt", "kgeography", "stellarium", "kalgebra"]
 }
+def check_root(): return os.geteuid() == 0
 
-# --- Helper: Check if running as root ---
-def check_root():
-    return os.geteuid() == 0
 
-# --- Archinstall Interaction Thread (JSON + CLI) ---
-class ArchinstallThread(QThread):
-    installation_finished = pyqtSignal(bool, str)
-    installation_log = pyqtSignal(str)
+# --- Installer Engine Thread (Using Archinstall Library Directly) ---
+class InstallerEngineThread(QThread):
+    installation_finished = pyqtSignal(bool, str) # bool: success, str: message
+    installation_log = pyqtSignal(str)            # str: log message
+    disk_scan_complete = pyqtSignal(dict)         # dict: {dev_path: {info}}
 
-    def __init__(self, config_dict_for_json):
+    def __init__(self, installation_settings):
         super().__init__()
-        self.config_data = config_dict_for_json # Should contain profile, silent, script keys
-        self.config_file_path = "/tmp/archinstall_config.json"
+        self.settings = installation_settings
+        self._running = True
 
-    def run(self):
-        try:
-            self.installation_log.emit("Preparing archinstall JSON configuration...")
-            with open(self.config_file_path, 'w') as f:
-                json.dump(self.config_data, f, indent=2)
+        # Instantiate placeholder modules (user replaces these with actual archinstall modules)
+        # These would ideally be instantiated once if they hold state, or their functions called directly.
+        self.disk_module = ArchinstallDiskModulePlaceholder()
+        if hasattr(self.disk_module, 'log_signal'): # Connect if placeholder has it
+            self.disk_module.log_signal = self.installation_log # Allow module to emit logs
 
-            self.installation_log.emit(f"Archinstall JSON configuration saved to {self.config_file_path}")
-            # Log the config for debugging if needed, can be verbose
-            # self.installation_log.emit(f"Full JSON Configuration:\n{json.dumps(self.config_data, indent=2)}")
-            self.installation_log.emit("Starting Arch Linux installation process via archinstall CLI...")
-            self.installation_log.emit("This may take a while if a Desktop Environment is selected. Please be patient.")
+        # For other modules, we might pass the log signal or a log callback
+        self.package_module = None # Will be instantiated after mount_point is known
+        self.system_config_module = None # Ditto
 
-            # Command includes --silent, JSON includes "script": "default_installer" and "silent": True
-            cmd = ["archinstall", "--config", self.config_file_path, "--silent"]
+    def log(self, message):
+        self.installation_log.emit(message)
 
-            proc_env = os.environ.copy()
-            proc_env["TERM"] = "dumb"
-            if 'LC_ALL' not in proc_env: proc_env['LC_ALL'] = 'C.UTF-8'
-            if 'LANG' not in proc_env: proc_env['LANG'] = 'C.UTF-8'
-            
-            self.installation_log.emit(f"Launching subprocess: {' '.join(cmd)}")
-            self.installation_log.emit(f"  with ENV: TERM={proc_env['TERM']}, LC_ALL={proc_env.get('LC_ALL', 'N/A')}, LANG={proc_env.get('LANG', 'N/A')}")
+    def stop(self):
+        self.log("Attempting to stop installation thread...")
+        self._running = False
 
-            process = subprocess.Popen(cmd,
-                                       stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE,
-                                       stdin=subprocess.DEVNULL,
-                                       text=True,
-                                       bufsize=1, # Line buffered
-                                       universal_newlines=True,
-                                       env=proc_env)
-
-            stdout_lines = []
-            if process.stdout:
-                for line in iter(process.stdout.readline, ''):
-                    line_strip = line.strip()
-                    self.installation_log.emit(line_strip)
-                    stdout_lines.append(line_strip)
-
-            ret_code = process.wait() # Wait for process to finish
-
-            stderr_output = ""
-            if process.stderr: # Read any remaining stderr
-                stderr_output = process.stderr.read()
-                if stderr_output.strip():
-                    # Log snippet or full stderr
-                    stderr_lines = stderr_output.strip().split('\n')
-                    log_msg = f"Archinstall STDERR ({len(stderr_lines)} lines):\n"
-                    if len(stderr_lines) > 30: # If very long, log a snippet
-                        log_msg += "\n".join(stderr_lines[:15]) + "\n...\n" + "\n".join(stderr_lines[-15:])
-                    else:
-                        log_msg += stderr_output.strip()
-                    self.installation_log.emit(log_msg)
-            
-            if ret_code == 0:
-                self.installation_log.emit("Archinstall process completed successfully.")
-                self.installation_finished.emit(True, "Arch Linux installation successful!")
-            else:
-                error_msg_detail = f"Archinstall process failed with error code {ret_code}."
-                if stderr_output.strip():
-                     error_msg_detail += f"\n\nError Output (from archinstall STDERR):\n---\n{stderr_output.strip()}\n---"
-                elif stdout_lines:
-                     error_msg_detail += f"\n\nLast Output Lines (from archinstall STDOUT):\n---\n"
-                     error_msg_detail += "\n".join(stdout_lines[-20:]) # Show more lines
-                     error_msg_detail += "\n---"
-                
-                self.installation_log.emit(f"Archinstall failure. Full details available in log and potentially /var/log/archinstall/install.log on the target (if mounted).")
-                self.installation_log.emit(error_msg_detail) # Log the detailed message
-                
-                popup_error_msg = f"Archinstall process failed (code {ret_code}).\nSee installation log for detailed error output."
-                self.installation_finished.emit(False, popup_error_msg)
-
-        except FileNotFoundError:
-            err_msg = "Error: `archinstall` command not found. Is it installed and in your PATH?"
-            self.installation_log.emit(err_msg); self.installation_finished.emit(False, err_msg)
-        except Exception as e:
-            self.installation_log.emit(f"An error occurred in ArchinstallThread: {str(e)}\n{traceback.format_exc()}")
-            self.installation_finished.emit(False, f"An unexpected error occurred in ArchinstallThread: {str(e)}")
-        finally:
-            if os.path.exists(self.config_file_path):
-                try: os.remove(self.config_file_path)
-                except OSError as e: self.installation_log.emit(f"Warning: Could not remove temp config file {self.config_file_path}: {e}")
-
-
-class PostInstallThread(QThread): # No changes needed here based on the request
-    post_install_finished = pyqtSignal(bool, str)
-    post_install_log = pyqtSignal(str)
-    def __init__(self, script_path, target_mount_point="/mnt/archinstall"):
-        super().__init__()
-        self.script_path = script_path
-        self.target_mount_point = target_mount_point
-    def run(self):
-        if not self.script_path or not os.path.exists(self.script_path):
-            self.post_install_log.emit("Post-install script not provided or not found.")
-            self.post_install_finished.emit(True, "No post-install script executed.")
+    def run_disk_scan(self):
+        # This method is called from the GUI thread context before starting the main installation.
+        if not ARCHINSTALL_LIBRARY_AVAILABLE:
+            self.installation_log.emit("Archinstall library not available. Disk scan skipped.")
+            self.disk_scan_complete.emit({})
             return
-        target_script_path_in_chroot_tmp = None 
         try:
-            self.post_install_log.emit(f"Preparing post-installation script: {self.script_path}")
-            subprocess.run(["chmod", "+x", self.script_path], check=True)
-            script_basename = os.path.basename(self.script_path)
-            chroot_tmp_dir_on_host = os.path.join(self.target_mount_point, "tmp")
-            os.makedirs(chroot_tmp_dir_on_host, exist_ok=True)
-            target_script_path_in_chroot_tmp = os.path.join(chroot_tmp_dir_on_host, script_basename)
-            subprocess.run(["cp", self.script_path, target_script_path_in_chroot_tmp], check=True)
-            self.post_install_log.emit(f"Copied post-install script to {target_script_path_in_chroot_tmp} (for chroot)")
-            script_path_inside_chroot = os.path.join("/tmp", script_basename) 
-            cmd = ["arch-chroot", self.target_mount_point, "/bin/bash", script_path_inside_chroot]
-            self.post_install_log.emit(f"Executing in chroot: {' '.join(cmd)}")
-            proc_env_chroot = os.environ.copy()
-            proc_env_chroot["TERM"] = "dumb"
-            if 'LC_ALL' not in proc_env_chroot: proc_env_chroot['LC_ALL'] = 'C.UTF-8'
-            if 'LANG' not in proc_env_chroot: proc_env_chroot['LANG'] = 'C.UTF-8'
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, bufsize=1, universal_newlines=True, env=proc_env_chroot)
-            if process.stdout:
-                for line in iter(process.stdout.readline, ''): self.post_install_log.emit(line.strip())
-            ret_code = process.wait()
-            stderr_output = ""
-            if process.stderr:
-                stderr_output = process.stderr.read()
-                if stderr_output: self.post_install_log.emit(f"Post-install script STDERR:\n{stderr_output.strip()}")
-            if ret_code == 0:
-                self.post_install_log.emit("Post-installation script executed successfully.")
-                self.post_install_finished.emit(True, "Post-installation script finished.")
-            else:
-                error_msg = f"Post-installation script failed with error code {ret_code}.\n{stderr_output.strip()}"
-                self.post_install_log.emit(error_msg); self.post_install_finished.emit(False, error_msg)
-        except FileNotFoundError as e:
-            err_msg = f"Error: `arch-chroot` or script copy target missing ({e}). Is `arch-install-scripts` installed and target system mounted?"
-            self.post_install_log.emit(err_msg); self.post_install_finished.emit(False, err_msg)
-        except subprocess.CalledProcessError as e:
-            err_msg = f"Subprocess error during post-install prep: {e}"
-            self.post_install_log.emit(err_msg); self.post_install_finished.emit(False, err_msg)
+            self.installation_log.emit("Starting disk scan using archinstall library functions...")
+            # TODO: User needs to find the correct archinstall functions to list block devices
+            # This is a placeholder call.
+            # disks_data = archinstall.lib.disk.all_blockdevices() # Example hypothetical call
+            # For the placeholder:
+            disks_data = self.disk_module.get_disks()
+            
+            # Process disks_data into the format your QComboBox expects
+            # For example: {"/dev/sda": {"model": "XYZ", "size": "100G"}, ...}
+            self.installation_log.emit(f"Disks found: {disks_data}")
+            self.disk_scan_complete.emit(disks_data)
         except Exception as e:
-            self.post_install_log.emit(f"Error running post-install script: {str(e)}\n{traceback.format_exc()}")
-            self.post_install_finished.emit(False, f"Error running post-install script: {str(e)}")
+            self.installation_log.emit(f"Error during disk scan: {e}")
+            self.installation_log.emit(traceback.format_exc())
+            self.disk_scan_complete.emit({})
+
+
+    def run(self):
+        if not ARCHINSTALL_LIBRARY_AVAILABLE:
+            self.log("Archinstall library not available. Cannot proceed with installation.")
+            self.installation_finished.emit(False, "Archinstall library import failed.")
+            return
+        
+        self.log("Installation process started using archinstall library...")
+        mount_point = None
+
+        try:
+            # === Phase 1: Global Settings & Disk Preparation ===
+            self.log("Phase 1: Configuring global settings and preparing disks...")
+            # TODO: Set up archinstall's global configuration if necessary
+            # e.g., using glob_vars.storage or specific setter functions.
+            # glob_vars.storage['mount_point'] = Path(self.settings.get("mount_point_base", "/mnt/archinstall"))
+            # glob_vars.storage['hostname'] = self.settings.get("hostname")
+            # ... and many others ...
+            self.log(f"Target disk: {self.settings.get('target_disk_path')}")
+            self.log(f"Wipe disk: {self.settings.get('wipe_disk')}")
+
+            mount_point = self.disk_module.prepare_disk_layout(self.settings, self.log)
+            if not self._running: self.installation_finished.emit(False, "Installation stopped."); return
+            self.log(f"System will be installed to: {mount_point}")
+
+            # === Phase 2: Package Installation (Profiles + Additional) ===
+            self.log("Phase 2: Installing profile and packages...")
+            self.package_module = ArchinstallPackageManagerPlaceholder(mount_point, self.log) # Pass mount_point
+            self.package_module.install_profile_and_packages(
+                self.settings.get("profile"),
+                self.settings.get("additional_packages", [])
+            )
+            if not self._running: self.installation_finished.emit(False, "Installation stopped."); return
+
+            # === Phase 3: System Configuration (in chroot) ===
+            self.log("Phase 3: Configuring the installed system...")
+            self.system_config_module = ArchinstallSystemConfigurerPlaceholder(mount_point, self.log)
+            # Pass relevant parts of self.settings to the configure_system method
+            system_config_details = {
+                "hostname": self.settings.get("hostname"),
+                "locale": self.settings.get("locale"),
+                "kb_layout": self.settings.get("kb_layout"),
+                "timezone": self.settings.get("timezone"),
+                "username": self.settings.get("username"),
+                "password": self.settings.get("password"), # Be careful with passwords
+                "bootloader": self.settings.get("bootloader", "systemd-boot" if self.settings.get("is_efi") else "grub")
+            }
+            self.system_config_module.configure_system(system_config_details)
+            if not self._running: self.installation_finished.emit(False, "Installation stopped."); return
+
+            # === Phase 4: Finalization (Unmounting, etc.) ===
+            self.log("Phase 4: Finalizing installation...")
+            # TODO: User needs to find archinstall functions for:
+            # 1. Unmounting file systems (e.g., installer_instance.unmount_everything())
+            # 2. Any cleanup operations.
+            time.sleep(1)
+            self.log("Placeholder: Unmounted filesystems.")
+
+            self.log("Installation process completed successfully via library calls!")
+            self.installation_finished.emit(True, "Installation successful (via library)!")
+
+        except UserInteractionRequired as e: # If archinstall tries to ask a question
+            self.log(f"Error: Archinstall library required user interaction: {e}")
+            self.log(traceback.format_exc())
+            self.installation_finished.emit(False, f"Installation failed: Archinstall required user interaction.")
+        except ArchinstallError as e: # Catch specific archinstall library errors
+            self.log(f"Archinstall library error: {e}")
+            self.log(traceback.format_exc())
+            self.installation_finished.emit(False, f"Installation failed: {e}")
+        except ImportError as e: # Catch import errors that might occur if structure is wrong
+            self.log(f"Import error during installation: {e}. This indicates an issue with using archinstall as a library.")
+            self.log(traceback.format_exc())
+            self.installation_finished.emit(False, f"Library Import Error: {e}")
+        except Exception as e: # General catch-all
+            self.log(f"An unexpected error occurred during installation: {e}")
+            self.log(traceback.format_exc())
+            self.installation_finished.emit(False, f"An unexpected critical error occurred: {e}")
         finally:
-            if target_script_path_in_chroot_tmp and os.path.exists(target_script_path_in_chroot_tmp):
-                try:
-                    os.remove(target_script_path_in_chroot_tmp)
-                    self.post_install_log.emit(f"Cleaned up temporary script: {target_script_path_in_chroot_tmp}")
-                except OSError as e:
-                    self.post_install_log.emit(f"Warning: Could not remove temporary script {target_script_path_in_chroot_tmp}: {e}")
+            self.log("InstallerEngineThread finished.")
 
 
+# --- Main Application Window (Simplified for focus on backend) ---
 class MaiBloomInstallerApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.archinstall_json_config_data = {}
-        self.post_install_script_path = ""
-        self.init_ui()
+        self.installation_settings = {}
+        self.installer_thread = None # For managing the installation thread
+        self.disk_scanner_thread_helper = InstallerEngineThread({}) # Helper for scan_disks call
 
-    def init_ui(self): # No changes needed here based on the request
-        self.setWindowTitle('Mai Bloom OS Installer')
+        self.init_ui()
+        # Connect the disk scan helper's signal
+        self.disk_scanner_thread_helper.disk_scan_complete.connect(self.on_disk_scan_complete)
+        self.disk_scanner_thread_helper.installation_log.connect(self.update_log_output) # Also log scan messages
+
+    def init_ui(self):
+        self.setWindowTitle('Mai Bloom OS Installer (Archinstall Library Mode)')
         self.setGeometry(100, 100, 850, 700)
-        overall_layout = QVBoxLayout(self)
-        title_label = QLabel("<b>Welcome to Mai Bloom OS Installation!</b>")
-        title_label.setAlignment(Qt.AlignCenter)
-        overall_layout.addWidget(title_label)
-        overall_layout.addWidget(QLabel("<small>This installer generates a JSON config for archinstall. Please read explanations carefully.</small>"))
-        splitter = QSplitter(Qt.Horizontal)
-        overall_layout.addWidget(splitter)
-        controls_widget = QWidget()
-        controls_layout = QVBoxLayout(controls_widget)
-        disk_group = QGroupBox("Disk Setup")
-        disk_layout_vbox = QVBoxLayout()
-        scan_button = QPushButton("Scan for Available Disks")
-        scan_button.clicked.connect(self.scan_and_populate_disks)
-        disk_layout_vbox.addWidget(scan_button)
-        self.disk_combo = QComboBox()
-        self.disk_combo.setToolTip("Select the target disk. <b>ALL DATA WILL BE ERASED if 'Wipe Disk' is checked.</b>")
-        disk_layout_vbox.addLayout(self.create_form_row("Target Disk:", self.disk_combo))
-        disk_layout_vbox.addWidget(QLabel("<small>Ensure correct disk selection. This is irreversible if 'Wipe Disk' is checked.</small>"))
-        self.wipe_disk_checkbox = QCheckBox("Wipe selected disk (Uses archinstall's default auto-partitioning)")
-        self.wipe_disk_checkbox.setChecked(True)
-        self.wipe_disk_checkbox.setToolTip("Wipes disk and lets archinstall create its default layout.\nUncheck to use pre-existing partitions (advanced, requires manual setup).")
-        disk_layout_vbox.addWidget(self.wipe_disk_checkbox)
-        disk_group.setLayout(disk_layout_vbox)
-        controls_layout.addWidget(disk_group)
-        system_group = QGroupBox("System Configuration")
-        system_layout_grid = QGridLayout()
-        self.hostname_input = QLineEdit("mai-bloom-pc")
-        system_layout_grid.addWidget(QLabel("Hostname:"), 0, 0); system_layout_grid.addWidget(self.hostname_input, 0, 1)
-        self.locale_input = QLineEdit("en_US.UTF-8")
-        system_layout_grid.addWidget(QLabel("Locale:"), 1, 0); system_layout_grid.addWidget(self.locale_input, 1, 1)
-        self.keyboard_layout_input = QLineEdit("us")
-        system_layout_grid.addWidget(QLabel("Keyboard Layout:"), 2, 0); system_layout_grid.addWidget(self.keyboard_layout_input, 2, 1)
-        self.timezone_input = QLineEdit("UTC")
-        system_layout_grid.addWidget(QLabel("Timezone:"), 3, 0); system_layout_grid.addWidget(self.timezone_input, 3, 1)
-        system_group.setLayout(system_layout_grid)
-        controls_layout.addWidget(system_group)
-        user_group = QGroupBox("User Account Setup")
-        user_layout_grid = QGridLayout()
-        self.username_input = QLineEdit("bloomuser")
-        user_layout_grid.addWidget(QLabel("Username:"), 0, 0); user_layout_grid.addWidget(self.username_input, 0, 1)
-        self.password_input = QLineEdit(); self.password_input.setEchoMode(QLineEdit.Password)
-        user_layout_grid.addWidget(QLabel("Password:"), 1, 0); user_layout_grid.addWidget(self.password_input, 1, 1)
-        self.confirm_password_input = QLineEdit(); self.confirm_password_input.setEchoMode(QLineEdit.Password)
-        user_layout_grid.addWidget(QLabel("Confirm Password:"), 2, 0); user_layout_grid.addWidget(self.confirm_password_input, 2, 1)
-        user_group.setLayout(user_layout_grid)
-        controls_layout.addWidget(user_group)
-        software_group = QGroupBox("Software Selection")
-        software_layout_vbox = QVBoxLayout()
-        self.profile_combo = QComboBox()
-        self.profile_combo.addItems(["kde", "gnome", "xfce4", "minimal"])
-        software_layout_vbox.addLayout(self.create_form_row("Desktop/Profile:", self.profile_combo))
-        software_layout_vbox.addWidget(QLabel("<b>Additional Application Categories (Optional):</b>"))
-        self.app_category_checkboxes = {}
-        app_cat_layout_grid = QGridLayout()
-        row, col = 0, 0
-        for i, (category, _) in enumerate(APP_CATEGORIES.items()):
-            self.app_category_checkboxes[category] = QCheckBox(category)
-            app_cat_layout_grid.addWidget(self.app_category_checkboxes[category], row, col); col += 1
-            if col > 1: col = 0; row += 1
-        software_layout_vbox.addLayout(app_cat_layout_grid)
-        software_group.setLayout(software_layout_vbox)
-        controls_layout.addWidget(software_group)
-        post_install_group = QGroupBox("Custom Post-Installation")
-        post_install_layout_vbox = QVBoxLayout()
-        self.post_install_script_button = QPushButton("Select Post-Install Bash Script (Optional)")
-        self.post_install_script_button.clicked.connect(self.select_post_install_script)
-        self.post_install_script_label = QLabel("No script selected.")
-        post_install_layout_vbox.addWidget(self.post_install_script_button)
-        post_install_layout_vbox.addWidget(self.post_install_script_label)
-        post_install_group.setLayout(post_install_layout_vbox)
-        controls_layout.addWidget(post_install_group)
-        controls_layout.addStretch(1)
-        splitter.addWidget(controls_widget)
+        layout = QVBoxLayout(self)
+
+        # --- Log Output Area ---
         log_group = QGroupBox("Installation Log")
-        log_layout_vbox = QVBoxLayout()
+        log_layout = QVBoxLayout()
         self.log_output = QTextEdit()
-        self.log_output.setReadOnly(True); self.log_output.setLineWrapMode(QTextEdit.NoWrap)
-        log_layout_vbox.addWidget(self.log_output)
-        log_group.setLayout(log_layout_vbox)
+        self.log_output.setReadOnly(True)
+        self.log_output.setLineWrapMode(QTextEdit.NoWrap)
+        log_layout.addWidget(self.log_output)
+        log_group.setLayout(log_layout)
+
+        # --- Controls Area (Simplified for this example) ---
+        controls_widget = QWidget()
+        controls_main_layout = QVBoxLayout(controls_widget)
+
+        # Disk Selection
+        disk_group_box = QGroupBox("Disk Setup")
+        disk_layout = QVBoxLayout()
+        self.scan_disks_button = QPushButton("Scan for Disks (using Archinstall lib)")
+        self.scan_disks_button.clicked.connect(self.trigger_disk_scan)
+        disk_layout.addWidget(self.scan_disks_button)
+        self.disk_combo = QComboBox()
+        self.disk_combo.setToolTip("Select target disk.")
+        disk_layout.addLayout(self.create_form_row("Target Disk:", self.disk_combo))
+        self.wipe_disk_checkbox = QCheckBox("Wipe selected disk")
+        self.wipe_disk_checkbox.setChecked(True)
+        disk_layout.addWidget(self.wipe_disk_checkbox)
+        disk_group_box.setLayout(disk_layout)
+        controls_main_layout.addWidget(disk_group_box)
+
+        # Basic Settings
+        settings_group = QGroupBox("Basic Settings")
+        settings_layout = QGridLayout()
+        self.hostname_input = QLineEdit("maibloom-pc")
+        settings_layout.addWidget(QLabel("Hostname:"), 0, 0)
+        settings_layout.addWidget(self.hostname_input, 0, 1)
+        self.username_input = QLineEdit("maiuser")
+        settings_layout.addWidget(QLabel("Username:"), 1, 0)
+        settings_layout.addWidget(self.username_input, 1, 1)
+        self.password_input = QLineEdit("password"); self.password_input.setEchoMode(QLineEdit.Password) # Default for demo
+        settings_layout.addWidget(QLabel("Password:"), 2, 0)
+        settings_layout.addWidget(self.password_input, 2, 1)
+        self.profile_combo = QComboBox()
+        self.profile_combo.addItems(["minimal", "kde", "gnome", "xfce4"]) # Ensure these match archinstall profile names
+        settings_layout.addWidget(QLabel("Profile:"), 3, 0)
+        settings_layout.addWidget(self.profile_combo, 3, 1)
+        settings_group.setLayout(settings_layout)
+        controls_main_layout.addWidget(settings_group)
+        
+        # Additional Apps (Simplified)
+        app_group = QGroupBox("Additional Apps")
+        app_layout = QVBoxLayout()
+        self.chk_apps_daily = QCheckBox(f"Daily Use Apps ({', '.join(APP_CATEGORIES['Daily Use'][:2])}...)")
+        app_layout.addWidget(self.chk_apps_daily)
+        app_group.setLayout(app_layout)
+        controls_main_layout.addWidget(app_group)
+
+        controls_main_layout.addStretch()
+        
+        # Splitter for controls and log
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(controls_widget)
         splitter.addWidget(log_group)
-        splitter.setSizes([400, 450])
-        self.install_button = QPushButton("Start Installation")
-        self.install_button.setStyleSheet("background-color: lightgreen; padding: 10px; font-weight: bold;")
-        self.install_button.clicked.connect(self.start_installation_process)
-        button_layout = QHBoxLayout(); button_layout.addStretch(); button_layout.addWidget(self.install_button); button_layout.addStretch()
-        overall_layout.addLayout(button_layout)
-        self.scan_and_populate_disks()
+        splitter.setSizes([350, 500])
+        layout.addWidget(splitter)
+
+        # Install Button
+        self.install_button = QPushButton("Start Installation (Library Mode)")
+        self.install_button.setStyleSheet("background-color: lightblue; padding: 10px; font-weight: bold;")
+        self.install_button.clicked.connect(self.start_installation)
+        layout.addWidget(self.install_button)
+
+        if not ARCHINSTALL_LIBRARY_AVAILABLE:
+            self.update_log_output("CRITICAL: Archinstall library failed to import. Installation disabled.")
+            self.install_button.setEnabled(False)
+            self.scan_disks_button.setEnabled(False)
+        else:
+            self.update_log_output("Archinstall library components imported (or placeholders defined). Ready.")
+
 
     def create_form_row(self, label_text, widget):
-        row_layout = QHBoxLayout(); label = QLabel(label_text); label.setFixedWidth(120)
-        row_layout.addWidget(label); row_layout.addWidget(widget); return row_layout
+        row_layout = QHBoxLayout()
+        label = QLabel(label_text)
+        label.setFixedWidth(100)
+        row_layout.addWidget(label)
+        row_layout.addWidget(widget)
+        return row_layout
 
-    def scan_and_populate_disks(self): # No changes needed here based on the request
-        self.log_output.append("Scanning for disks...")
-        QApplication.processEvents() 
+    def trigger_disk_scan(self):
+        self.update_log_output("GUI: Triggering disk scan...")
+        self.scan_disks_button.setEnabled(False)
+        # Use the helper instance to call the method. It doesn't start a new thread here.
+        # The actual disk scanning logic needs to be implemented in InstallerEngineThread.run_disk_scan
+        self.disk_scanner_thread_helper.run_disk_scan() # This runs in the GUI thread
+
+    def on_disk_scan_complete(self, disks_data):
+        self.update_log_output(f"GUI: Disk scan complete. Received {len(disks_data)} disks.")
         self.disk_combo.clear()
-        try:
-            cmd = ['lsblk', '-J', '-b', '-p', '-o', 'NAME,SIZE,TYPE,MODEL,PATH,TRAN,PKNAME,RO,RM']
-            self.log_output.append(f"Executing: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True, encoding='utf-8')
-            data = json.loads(result.stdout)
-            disks_found = 0
-            self.log_output.append("Filtering block devices for installation targets:")
-            for device in data.get('blockdevices', []):
-                name = device.get('name', 'N/A')
-                dtype = device.get('type', 'N/A')
-                ro = device.get('ro', True) 
-                rm = device.get('rm', True) 
-                pkname = device.get('pkname', None)
-                tran = device.get('tran', 'N/A')
-                log_line = (f"  Checking: {name}, Type: {dtype}, RO: {ro}, RM: {rm}, "
-                            f"PKNAME: {pkname}, Size: {device.get('size', 0)}, "
-                            f"Model: {device.get('model', 'N/A')}, Tran: {tran}")
-                if dtype == 'disk' and not ro and not pkname:
-                    model = device.get('model', 'Unknown Model')
-                    size_bytes = int(device.get('size', 0))
-                    if size_bytes < 10 * (1024**3):
-                        self.log_output.append(log_line + f" -> Skipping (Too small: {size_bytes / (1024**3):.2f} GB)")
-                        continue
-                    is_root_device = False
-                    if device.get('children'):
-                        for child in device.get('children', []):
-                            if child.get('mountpoint') == '/' or \
-                               (child.get('mountpoints') and '/' in child.get('mountpoints')):
-                                is_root_device = True; break
-                    if device.get('mountpoint') == '/' or \
-                       (device.get('mountpoints') and '/' in device.get('mountpoints')):
-                        is_root_device = True
-                    if is_root_device:
-                        self.log_output.append(log_line + " -> Skipping (Appears to be current root FS)")
-                        continue
-                    display_text = f"{name} - {model} ({size_bytes / (1024**3):.2f} GB)"
-                    self.disk_combo.addItem(display_text, userData={"path": name, "size_bytes": size_bytes})
-                    self.log_output.append(log_line + f" -> Added to dropdown: {display_text}")
-                    disks_found += 1
-                else:
-                    self.log_output.append(log_line + " -> Skipping (Does not meet criteria)")
-            if disks_found == 0:
-                msg = "No suitable installation disks found after filtering. Ensure a non-read-only, non-partition, sufficiently large disk is available and not the current OS disk."
-                self.log_output.append(msg); QMessageBox.warning(self, "Disk Scan", msg)
-            else:
-                self.log_output.append(f"Disk scan complete. Found {disks_found} suitable disk(s).")
-        except FileNotFoundError:
-            self.log_output.append("Error: `lsblk` command not found."); QMessageBox.critical(self, "Error", "`lsblk` not found.")
-        except subprocess.CalledProcessError as e:
-            self.log_output.append(f"Error scanning disks with lsblk: {e.stderr}"); QMessageBox.warning(self, "Disk Scan Error", f"Could not scan disks: {e.stderr}")
-        except json.JSONDecodeError as e:
-            self.log_output.append(f"Error parsing lsblk JSON output: {e}"); QMessageBox.warning(self, "Disk Scan Error", "Failed to parse disk info.")
-        except Exception as e:
-            self.log_output.append(f"Unexpected error during disk scan: {str(e)}\n{traceback.format_exc()}")
-            QMessageBox.critical(self, "Disk Scan Error", f"An unexpected error occurred: {str(e)}")
-
-    def select_post_install_script(self): # No changes needed here based on the request
-        options = QFileDialog.Options()
-        filePath, _ = QFileDialog.getOpenFileName(self, "Select Post-Installation Bash Script", "", "Bash Scripts (*.sh);;All Files (*)", options=options)
-        if filePath:
-            self.post_install_script_path = filePath
-            self.post_install_script_label.setText(f"Script: {os.path.basename(filePath)}")
-            self.log_output.append(f"Post-install script selected: {filePath}")
+        if disks_data:
+            for path, info in disks_data.items():
+                display_text = f"{path} - {info.get('model', 'N/A')} ({info.get('size', 'N/A')})"
+                self.disk_combo.addItem(display_text, userData=path)
         else:
-            self.post_install_script_path = ""; self.post_install_script_label.setText("No script selected.")
+            self.update_log_output("GUI: No disks returned from scan or scan failed.")
+        self.scan_disks_button.setEnabled(True)
 
-    def update_log(self, message): # No changes needed here
+
+    def update_log_output(self, message):
         self.log_output.append(message)
-        self.log_output.ensureCursorVisible(); QApplication.processEvents()
+        self.log_output.ensureCursorVisible()
+        QApplication.processEvents() # Keep UI responsive during non-threaded updates
 
-    def start_installation_process(self):
-        hostname = self.hostname_input.text().strip()
-        username = self.username_input.text().strip()
-        password = self.password_input.text()
-        confirm_password = self.confirm_password_input.text()
-        locale_str = self.locale_input.text().strip()
-        kb_layout = self.keyboard_layout_input.text().strip()
-        timezone = self.timezone_input.text().strip()
+    def gather_settings(self):
+        settings = {}
         selected_disk_index = self.disk_combo.currentIndex()
-        
-        # --- MODIFICATION: Get the profile name to use in the JSON ---
-        profile_name = self.profile_combo.currentText() # e.g., "kde", "gnome", "minimal"
-        
-        wipe_disk_checked = self.wipe_disk_checkbox.isChecked()
-
-        if selected_disk_index < 0:
-            QMessageBox.warning(self, "Input Error", "Please select a target disk."); return
-        disk_data = self.disk_combo.itemData(selected_disk_index)
-        if not disk_data or "path" not in disk_data or "size_bytes" not in disk_data:
-            QMessageBox.critical(self, "Disk Error", "Selected disk data is invalid. Please re-scan disks."); return
-        disk_path_str = disk_data["path"]
-        disk_size_bytes = disk_data["size_bytes"]
-
-        if not all([hostname, username, password, locale_str, kb_layout, disk_path_str, timezone]):
-            QMessageBox.warning(self, "Input Error", "Please fill in all required fields."); return
-        if password != confirm_password:
-            QMessageBox.warning(self, "Input Error", "Passwords do not match."); return
-
-        # --- MODIFICATION: Update Confirmation Message ---
-        confirm_msg_detail = f"<b>TARGET DISK: {disk_path_str}</b> ({disk_size_bytes / (1024**3):.2f} GB)\n"
-        confirm_msg_detail += f"Hostname: {hostname}\n"
-        confirm_msg_detail += f"Username: {username}\n"
-        confirm_msg_detail += f"Desktop Environment/Profile: <b>{profile_name}</b>\n\n" # State the selected profile
-
-        if wipe_disk_checked:
-            confirm_msg_detail += f"<b>ALL DATA ON {disk_path_str} WILL BE ERASED. Archinstall will use its default partitioning scheme.</b>\n"
+        if selected_disk_index >= 0:
+            settings["target_disk_path"] = self.disk_combo.itemData(selected_disk_index)
         else:
-            confirm_msg_detail += f"<b>The disk {disk_path_str} will NOT be wiped. Using existing partitions (ADVANCED - ensure correct setup).</b>\n"
-        confirm_msg_detail += "Proceed with the installation?"
+            # Handle no disk selected error before this point usually
+            self.update_log_output("Error: No target disk selected.")
+            return None 
+            
+        settings["wipe_disk"] = self.wipe_disk_checkbox.isChecked()
+        # TODO: Add more sophisticated partitioning options from GUI to settings
+        # For now, this implies a simple "auto" partitioning on the wiped disk by archinstall library
+        settings["partitioning_options"] = "auto_efi" if settings["wipe_disk"] else "use_existing"
 
-        reply = QMessageBox.question(self, f'Confirm Installation ({profile_name} Profile)', confirm_msg_detail, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+
+        settings["hostname"] = self.hostname_input.text().strip()
+        settings["username"] = self.username_input.text().strip()
+        settings["password"] = self.password_input.text() # In real app, ensure this is handled securely
+        settings["profile"] = self.profile_combo.currentText()
+        
+        # These would come from more detailed GUI elements:
+        settings["locale"] = "en_US.UTF-8" # Placeholder
+        settings["kb_layout"] = "us"         # Placeholder
+        settings["timezone"] = "UTC"        # Placeholder
+        settings["is_efi"] = os.path.exists("/sys/firmware/efi") # OS check
+
+        additional_packages = []
+        if self.chk_apps_daily.isChecked():
+            additional_packages.extend(APP_CATEGORIES["Daily Use"])
+        # TODO: Add other app category checkboxes
+        settings["additional_packages"] = list(set(additional_packages))
+        
+        self.update_log_output(f"Installation settings gathered: {settings}")
+        return settings
+
+    def start_installation(self):
+        if not ARCHINSTALL_LIBRARY_AVAILABLE:
+            QMessageBox.critical(self, "Error", "Archinstall library components are not available. Cannot start installation.")
+            return
+
+        self.installation_settings = self.gather_settings()
+        if not self.installation_settings or not self.installation_settings.get("target_disk_path"):
+            QMessageBox.warning(self, "Configuration Incomplete", "Please select a target disk and ensure all settings are correct.")
+            return
+
+        # Basic confirmation
+        reply = QMessageBox.question(self, 'Confirm Installation',
+                                     f"Start installation on {self.installation_settings['target_disk_path']} "
+                                     f"with profile {self.installation_settings['profile']}?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.No:
-            self.log_output.append("Installation cancelled by user."); return
+            self.update_log_output("Installation cancelled by user.")
+            return
 
-        self.install_button.setEnabled(False); self.log_output.clear()
-        self.log_output.append(f"Preparing JSON configuration for archinstall (Profile: {profile_name})...")
+        self.install_button.setEnabled(False)
+        self.scan_disks_button.setEnabled(False) # Disable while installing
+        self.log_output.clear()
+        self.update_log_output("Starting installation...")
 
-        is_efi = os.path.exists("/sys/firmware/efi")
-        self.log_output.append(f"EFI System Detected: {is_efi}")
-        sys_lang_base = locale_str.split('.')[0] if '.' in locale_str else locale_str
-
-        # --- MODIFICATION: Construct JSON to use archinstall profiles ---
-        config_data_for_archinstall = {
-            "script": "default_installer", # Instruct archinstall to use its non-interactive script
-            "silent": True,               # Ensure silent operation from JSON too
-
-            "hostname": hostname,
-            "locale_config": {
-                "sys_lang": sys_lang_base,
-                "kb_layout": kb_layout
-            },
-            "timezone": timezone,
-            "bootloader": "systemd-boot" if is_efi else "grub",
-            "users": [{"username": username, "password": password, "sudo": True}],
-            "packages": [], # For *additional* packages beyond the profile
-            "ntp": True,
-            "swap": True, # Let archinstall handle swap creation based on its defaults for the profile
-        }
-        if is_efi:
-             config_data_for_archinstall['efi'] = True
-        
-        # --- MODIFICATION: Add profile configuration ---
-        # The exact structure for profile_config can vary with archinstall versions.
-        # This is a common way:
-        # If profile_name is "minimal", archinstall might not expect a "profile_config" or specific DE profile.
-        # However, many archinstall versions accept "minimal" as a valid profile name directly.
-        if profile_name and profile_name.lower() != "none": # Assuming "minimal" is a valid profile
-            config_data_for_archinstall["profile_config"] = {
-                "profile": {
-                    "main": profile_name # e.g. "kde", "gnome", "xfce4", "minimal"
-                }
-                # Some archinstall versions might allow specifying greeter, audio here, e.g.,
-                # "greeter": "sddm", # if profile is kde
-                # "audio_server": "pipewire" 
-            }
-            # Alternatively, some archinstall versions might just take a top-level "profile" key:
-            # config_data_for_archinstall["profile"] = profile_name
-            self.log_output.append(f"Using profile: {profile_name}")
-        else:
-            self.log_output.append("No specific Desktop Environment profile selected (or 'minimal' implies base install).")
-
-
-        # Disk Configuration (remains similar, archinstall profiles usually work with this disk setup)
-        if wipe_disk_checked:
-            config_data_for_archinstall["harddrives"] = [disk_path_str]
-            config_data_for_archinstall["disk_encryption"] = None 
-            config_data_for_archinstall["disk_layouts"] = {
-                 disk_path_str: { "wipe": True, "layout_type": "auto" }
-            }
-            self.log_output.append(f"Config: Wiping {disk_path_str} and using auto layout.")
-        else:
-            config_data_for_archinstall["harddrives"] = [disk_path_str]
-            config_data_for_archinstall["disk_layouts"] = {
-                 disk_path_str: { "wipe": False }
-            }
-            self.log_output.append(f"Config: Using existing partitions on {disk_path_str} (wipe=False).")
-
-        # Package Selection: These are *additional* to what the profile installs.
-        # Base packages are usually handled by the profile itself (especially DE profiles).
-        # However, ensuring some absolute minimums can be good.
-        additional_packages = [] # Start with an empty list for additional packages
-        
-        # Add essential tools if not guaranteed by all profiles (especially 'minimal' profile)
-        # Most DE profiles (kde, gnome, xfce4) will pull in base, linux, networkmanager etc.
-        # If 'minimal' profile is chosen, these become more critical to list.
-        # It's generally safe to list them; pacman won't reinstall if already part of profile.
-        additional_packages.extend(["networkmanager", "sudo", "nano"])
-        if profile_name.lower() == "minimal": # For minimal profile, ensure base system components are there
-             additional_packages.extend(["base", "linux", "linux-firmware"])
-             if not is_efi: additional_packages.append("grub")
-             else: additional_packages.append("efibootmgr")
-        
-        for category, checkbox in self.app_category_checkboxes.items():
-            if checkbox.isChecked():
-                additional_packages.extend(APP_CATEGORIES[category])
-        
-        if additional_packages: # Only add "packages" key if there are any
-            config_data_for_archinstall["packages"] = list(set(additional_packages))
-
-        self.archinstall_json_config_data = config_data_for_archinstall # Store the config being used
-
-        self.log_output.append(f"JSON Configuration (Profile: {profile_name}) prepared for Archinstall thread:\n{json.dumps(self.archinstall_json_config_data, indent=2)}")
-
-        self.installer_thread = ArchinstallThread(self.archinstall_json_config_data)
-        self.installer_thread.installation_log.connect(self.update_log)
+        # Create and start the installer thread
+        self.installer_thread = InstallerEngineThread(self.installation_settings)
+        self.installer_thread.installation_log.connect(self.update_log_output)
         self.installer_thread.installation_finished.connect(self.on_installation_finished)
-        self.installer_thread.start()
+        self.installer_thread.start() # Starts the run() method in a new thread
 
-    def on_installation_finished(self, success, message): # No changes needed here
-        self.update_log(message)
+    def on_installation_finished(self, success, message):
+        self.update_log_output(f"GUI: Installation finished. Success: {success}, Message: {message}")
         if success:
-            QMessageBox.information(self, "Installation Complete", f"Arch Linux installation finished successfully!\nProfile selected: {self.archinstall_json_config_data.get('profile_config', {}).get('profile', {}).get('main', 'N/A')}")
-            if self.post_install_script_path:
-                self.log_output.append("\n--- Proceeding to post-installation script. ---")
-                archinstall_mount_point = self.archinstall_json_config_data.get("mount_point", "/mnt/archinstall")
-                self.run_post_install_script(archinstall_mount_point)
-            else:
-                self.install_button.setEnabled(True); self.log_output.append("No post-install script selected.")
+            QMessageBox.information(self, "Installation Complete", message)
         else:
-            QMessageBox.critical(self, "Installation Failed", f"Installation failed.\n{message}")
-            self.install_button.setEnabled(True)
-
-    def run_post_install_script(self, target_mount_point): # No changes needed here
-        self.log_output.append(f"\n--- Starting Post-Installation Script (Target: {target_mount_point}) ---")
-        self.post_installer_thread = PostInstallThread(self.post_install_script_path, target_mount_point=target_mount_point)
-        self.post_installer_thread.post_install_log.connect(self.update_log)
-        self.post_installer_thread.post_install_finished.connect(self.on_post_install_finished)
-        self.post_installer_thread.start()
-
-    def on_post_install_finished(self, success, message): # No changes needed here
-        self.update_log(message)
-        if success: QMessageBox.information(self, "Post-Install Complete", "Post-installation script finished.")
-        else: QMessageBox.warning(self, "Post-Install Issue", f"Post-install script reported issues.\n{message}")
+            QMessageBox.critical(self, "Installation Failed", message)
         self.install_button.setEnabled(True)
-        self.log_output.append("Mai Bloom OS setup process finished.")
+        self.scan_disks_button.setEnabled(True)
 
 
-if __name__ == '__main__': # No changes needed here
+if __name__ == '__main__':
     if not check_root():
-        temp_app_for_msgbox = QApplication.instance()
-        if not temp_app_for_msgbox:
-            temp_app_for_msgbox = QApplication(sys.argv)
+        # Attempt to show Qt message box for root error
+        # Must be done after QApplication is initialized if you want a Qt dialog
+        # For simplicity here, just print and exit if no app instance yet
+        app_temp = QApplication.instance() 
+        if not app_temp: 
+            app_temp = QApplication(sys.argv) # Create one for the message box
         QMessageBox.critical(None, "Root Access Required", "This application must be run as root (or with sudo).")
-        print("Error: This application must be run as root (or with sudo). Exiting.")
         sys.exit(1)
+
     app = QApplication(sys.argv)
     installer = MaiBloomInstallerApp()
     installer.show()
     sys.exit(app.exec_())
-
