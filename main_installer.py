@@ -1,196 +1,480 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import sys
-import os
-import time
 import subprocess
-import traceback
-import logging
+import json
+import os # For checking sudo
 
-# --- Privilege Check ---
-if os.geteuid() != 0: print("ERROR: Run with sudo."); sys.exit(1)
-
-# --- Attempt Archinstall Import ---
-try: import archinstall; ARCHINSTALL_AVAILABLE = True
-except ImportError: print("ERROR: 'archinstall' library not found."); sys.exit(1)
-
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QSplitter,
-    QScrollArea, QPlainTextEdit, QPushButton, QMessageBox, QFrame, QGroupBox,
-    QComboBox, QLineEdit, QCheckBox, QGridLayout, QAction, QMenuBar
-)
-from PyQt5.QtGui import QIcon, QFontDatabase, QFont, QPixmap, QPainter, QColor
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, pyqtSlot
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
+                             QLabel, QLineEdit, QPushButton, QComboBox,
+                             QMessageBox, QFileDialog, QTextEdit, QCheckBox)
+from PyQt5.QtCore import QThread, pyqtSignal
 
 # --- Configuration ---
-APP_NAME = "Mai Bloom OS Installer (Simple)"
-LOGO_FILENAME = "logo.png"
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOGO_PATH = os.path.join(SCRIPT_DIR, LOGO_FILENAME)
+# It's a good idea to check if running as root early on,
+# as archinstall will definitely need it.
+def check_root():
+    return os.geteuid() == 0
 
-DEFAULT_CONFIG = { 'os_name': 'Mai Bloom OS', 'locale': 'en_US.UTF-8', 'keyboard_layout': 'us', 'mirror_region': 'Worldwide', 'harddrives': [], 'disk_config': {'!layout': {}}, 'disk_encryption': None, 'hostname': 'maibloom-pc', '!users': [], '!root-password': '', 'profile': 'kde', '_app_categories': [], 'packages': [], 'timezone': 'Asia/Tehran', 'kernels': ['linux'], 'nic': 'NetworkManager', 'audio': 'pipewire', 'swap': True, 'bootloader': 'systemd-boot' if os.path.exists('/sys/firmware/efi') else 'grub', '_os_brand_name': 'Mai Bloom OS' }
+# --- Archinstall Interaction Thread ---
+# Running archinstall directly in the GUI thread will freeze it.
+# So, we use a QThread.
 
-# --- Stylesheet Constant ---
-DARK_THEME_QSS="""QMainWindow,QWidget{font-size:10pt;background-color:#2E2E2E;color:#E0E0E0}QScrollArea{border:none; background-color:#2E2E2E;} QScrollArea > QWidget > QWidget { background-color:#2E2E2E; } QGroupBox{border:1px solid #4A4A4A;border-radius:5px;margin-top:1ex;font-weight:bold;color:#00BFFF}QGroupBox::title{subcontrol-origin:margin;subcontrol-position:top left;padding:0 5px;background-color:#2E2E2E}QLabel{color:#E0E0E0;margin-bottom:2px}QPushButton{padding:8px 15px;border-radius:4px;background-color:#555;color:#FFF;border:1px solid #686868;font-weight:bold}QPushButton:hover{background-color:#686868}QPushButton:disabled{background-color:#404040;color:#808080}QPushButton#InstallButton{background-color:#4CAF50;border-color:#388E3C}QPushButton#InstallButton:hover{background-color:#388E3C}QPlainTextEdit#LogOutput{background-color:#1C1C1C;color:#C0C0C0;border:1px solid #434343;font-family:"Monospace"}QLineEdit,QComboBox{padding:6px 8px;border:1px solid #555;border-radius:4px;background-color:#3D3D3D;color:#E0E0E0}QCheckBox{margin:5px 0;color:#E0E0E0}QCheckBox::indicator{width:16px;height:16px;background-color:#555;border:1px solid #686868;border-radius:3px}QCheckBox::indicator:checked{background-color:#007BFF}QProgressBar{text-align:center;padding:1px;border-radius:5px;background-color:#555;border:1px solid #686868;color:#E0E0E0;min-height:20px}QProgressBar::chunk{background-color:#007BFF;border-radius:4px}QSplitter::handle{background-color:#4A4A4A}QSplitter::handle:horizontal{width:3px}"""
+class ArchinstallThread(QThread):
+    installation_finished = pyqtSignal(bool, str) # bool: success, str: message/error
+    installation_log = pyqtSignal(str)
 
-# --- Text Constants ---
-WELCOME_STEP_HTML = (f"<h2>Welcome to {APP_NAME}!</h2><p>Installer guide...</p><h3>Notes:</h3><ul><li>Internet recommended.</li><li>Backup data!</li><li>Disk ops may erase data.</li></ul><p>Configure below.</p>")
-LANGUAGE_STEP_EXPLANATION = "Select system language (menus, messages)."
-KEYBOARD_STEP_EXPLANATION = "Choose layout matching your keyboard."
-SELECT_DISK_STEP_EXPLANATION = "Choose install disk.<br><b style='color:yellow;'>Data may be erased.</b>"
-APP_CATEGORIES_EXPLANATION = "Select app types for initial setup (optional)."
-SUMMARY_STEP_INTRO_TEXT = "Review settings. <b style='color:yellow;'>Install button modifies disk!</b>"
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.script_path = "/tmp/archinstall_config.json" # Temporary config file
 
-# --- Utility Functions (Using Archinstall) ---
-def get_keyboard_layouts():
-    try: return sorted(archinstall.list_keyboard_languages())
-    except Exception as e: print(f"WARN kbd layouts: {e}"); return ["us"]
-def get_locales(): print("WARN locales: using curated list."); return ["en_US.UTF-8", "fa_IR.UTF-8"]
-def get_block_devices_info():
-    try:
-        raw=archinstall.list_block_devices(human_readable=False); devs=[]
-        for p,d in raw.items():
-            dt=getattr(d,'type','').lower(); sz=getattr(d,'size',0)
-            if dt=='disk' and isinstance(sz,int) and sz>(1*1024**3): devs.append({'name':p,'size':sz,'lbl':getattr(d,'label',None)})
-        if not devs: print("WARN: No disks found.")
-        return devs
-    except Exception as e: print(f"ERROR disks: {e}"); return []
-def get_mirror_regions(): try: r=archinstall.list_mirror_regions(); return r if r else {"WW":"WW"} except Exception: return {"WW":"WW"}
-def get_timezones(): try: z=archinstall.list_timezones(); return z if z else {"UTC":["UTC"]} except Exception: return {"UTC":["UTC"]}
-def get_profiles(): try: pd=archinstall.profile.list_profiles(); pl=[{"n":n,"d":getattr(p,'desc','')} for n,p in pd.items() if not n.startswith('_')]; return pl if pl else [{"n":"Minimal","d":"Basic"}] except Exception: return [{"n":"Minimal","d":"Basic"}]
-
-# --- Qt Log Handler ---
-class QtLogHandler(logging.Handler):
-    def __init__(self,log_signal):super().__init__();self.sig=log_signal;self.setFormatter(logging.Formatter('%(levelname)s:%(message)s'))
-    def emit(self,record):self.sig.emit(self.format(record))
-
-# --- Installation Thread ---
-class InstallationThread(QThread):
-    log_signal=pyqtSignal(str);progress_signal=pyqtSignal(int,str);finished_signal=pyqtSignal(bool,str)
-    def __init__(self, config): super().__init__(); self.config=config
-    def setup_logging(self): log=logging.getLogger('archinstall');log.setLevel(logging.INFO);
-                           if not any(isinstance(h,QtLogHandler) for h in log.handlers): log.addHandler(QtLogHandler(self.log_signal)) # ; self.log_signal.emit("Log capture setup.") # Removed redundant emit
-    def map_cats(self,cats): mapping={"Programming":["git","code"],"Gaming":["steam"],"Office":["libreoffice-fresh"],"Graphics":["gimp"]}; pkgs=set();[pkgs.update(mapping.get(c,[])) for c in cats]; return list(pkgs)
     def run(self):
-        self.setup_logging(); self.log_signal.emit("Starting install..."); self.progress_signal.emit(0,"Prep...")
         try:
-            conf=self.config.copy(); conf['keyboard_layout']=conf.pop('kb_layout',DEFAULT_CONFIG['keyboard_layout']); conf['locale']=conf.pop('sys_lang',DEFAULT_CONFIG['locale']); conf.pop('locale_config',None)
-            conf['mirror_region']=conf.pop('mirror_region_code',DEFAULT_CONFIG['mirror_region']); conf.pop('mirror_region_display_name',None)
-            disk=conf.pop('harddrives',[])[0] if conf.get('harddrives') else None;
-            if not disk: raise ValueError("Disk missing.")
-            fs=conf.pop('disk_filesystem',DEFAULT_CONFIG['disk_config']['filesystem'])
-            conf['disk_config']={'!layout':{disk:{'wipe':True,'filesystem':{'format':fs}}}}
-            if conf.get('disk_encrypt'): conf['disk_encryption']=[{'device':disk,'password':conf.pop('disk_encrypt_password'),'type':'luks'}]
-            else: conf.pop('disk_encryption',None);conf.pop('disk_encrypt_password',None)
-            users=[];
-            if conf.get('username'): users.append({'username':conf.pop('username'),'password':conf.pop('user_password'),'sudo':conf.pop('user_sudo',True)})
-            conf['!users']=users; conf['!root-password']=conf.pop('root_password')
-            prof=conf.pop('profile_name',DEFAULT_CONFIG['profile']); conf['profile']=prof if prof!='Minimal' else None
-            cat_pkgs=self.map_cats(conf.get('_app_categories',[])); add_pkgs=conf.get('packages',[])
-            conf['packages']=list(set(cat_pkgs+add_pkgs)); brand=conf.pop('_os_brand_name','Mai Bloom OS')
-            conf['custom_commands']=[f'sed -i \'s/^PRETTY_NAME=.*/PRETTY_NAME="{brand}"/\' /etc/os-release']
-            keys_del=['_app_categories','disk_filesystem','disk_encrypt','username','user_password','user_sudo']; [conf.pop(k,None) for k in keys_del]
-            log_cfg={k:v for k,v in conf.items() if k not in['!users','!root-password','disk_encryption']}; self.log_signal.emit(f"Final Conf: {log_cfg}"); self.progress_signal.emit(5,"Starting...")
-            # --- MOCK INSTALL ---
-            self.log_signal.emit("Calling archinstall (MOCK)..."); time.sleep(1); self.progress_signal.emit(10,"Disk..."); time.sleep(1); self.progress_signal.emit(40,"Pkgs..."); time.sleep(1); self.progress_signal.emit(80,"Config..."); time.sleep(1); self.progress_signal.emit(100,"Done..."); time.sleep(0.5)
-            # --- End MOCK ---
-            self.log_signal.emit("Install OK (sim)."); self.finished_signal.emit(True,f"{DEFAULT_CONFIG['os_name']} install OK (sim).")
-        except Exception as e: self.log_signal.emit(f"FATAL err: {e}\n{traceback.format_exc()}"); self.finished_signal.emit(False,f"Install fail: {e}")
+            self.installation_log.emit("Preparing archinstall configuration...")
+            # Archinstall typically takes a JSON file for its --conf parameter
+            # Or can be scripted by setting global variables within archinstall.Installer()
+            # For simplicity and better control, let's simulate preparing a config
+            # that archinstall functions would use.
 
-# --- Config Section Widget Base Class ---
-class ConfigSectionWidget(QGroupBox): # (Unchanged)
-    def __init__(self,title,cfg,main):super().__init__(title);self.cfg=cfg;self.main=main;self.layout=QVBoxLayout(self);self.layout.setSpacing(10);self.layout.setContentsMargins(10,20,10,10)
-    def load(self):pass
-    def save(self):return True
+            # --- IMPORTANT ---
+            # This is where the core interaction with the archinstall library happens.
+            # You'll need to consult the archinstall source code to see how to
+            # programmatically set these values and trigger the installation steps.
+            #
+            # Example (Conceptual - API might differ significantly):
+            #
+            # from archinstall import Installer, GlobalArchinstallVariables
+            #
+            # # 1. Set global variables (less direct, more prone to breaking with updates)
+            # GlobalArchinstallVariables.BIOS_UEFI_BOOT_MODE = 'uefi' # or 'bios'
+            # GlobalArchinstallVariables.DISK_LAYOUTS = {...} # complex
+            # GlobalArchinstallVariables.USER_CONFIG = {...}
+            # # ... and many others
+            #
+            # # 2. Or, more likely, you might prepare a dictionary and pass it to
+            # # specific functions or an Installer class instance.
+            #
+            # installer_instance = Installer()
+            # # installer_instance.load_config(self.config) # Hypothetical
+            # installer_instance.select_disk(self.config.get('block_device'))
+            # installer_instance.set_hostname(self.config.get('hostname'))
+            # # ... and so on for each step: partitioning, formatting, installing base, user creation etc.
+            # installer_instance.install_base_packages()
+            # installer_instance.setup_user(...)
+            # installer_instance.install_bootloader()
+            #
+            # This part is HIGHLY dependent on the archinstall library's structure
+            # and how it's meant to be used programmatically.
+            # The following is a placeholder for calling archinstall as a command-line
+            # tool with a generated config, which is often more stable if a programmatic API
+            # isn't well-defined or is too complex for this stage.
 
-# --- Concrete Config Section Widgets ---
-class LocaleKeyboardSection(ConfigSectionWidget): # (Condensed)
-    def __init__(self,c,m):super().__init__("🌍 Lang & Kbd",c,m);grid=QGridLayout();grid.setSpacing(10);grid.addWidget(QLabel("Locale:"),0,0);self.lc=QComboBox();self.lc.addItems(get_locales());grid.addWidget(self.lc,0,1);grid.addWidget(QLabel("Keyboard:"),1,0);self.kb=QComboBox();self.kb.addItems(get_keyboard_layouts());grid.addWidget(self.kb,1,1);self.layout.addLayout(grid)
-    def load(self): self.lc.setCurrentText(self.cfg.get('locale',DEFAULT_CONFIG['locale'])); self.kb.setCurrentText(self.cfg.get('keyboard_layout',DEFAULT_CONFIG['keyboard_layout']))
-    def save(self): lc,kb=self.lc.currentText(),self.kb.currentText(); self.cfg['locale'],self.cfg['keyboard_layout']=lc,kb; return bool(lc and kb or QMessageBox.warning(self,"","Select locale & kbd."))
-class DiskSection(ConfigSectionWidget): # (Condensed - Populate CORRECTED)
-    def __init__(self,c,m):super().__init__("💾 Disk (Guided Wipe)",c,m);self.layout.addWidget(QLabel("<b style='color:yellow;'>WIPES DISK!</b>"));grid=QGridLayout();grid.setSpacing(10);grid.addWidget(QLabel("Disk:"),0,0);self.dc=QComboBox();grid.addWidget(self.dc,0,1);grid.addWidget(QLabel("FS:"),1,0);self.fs=QComboBox();self.fs.addItems(['ext4','btrfs','xfs']);grid.addWidget(self.fs,1,1);self.enc_cb=QCheckBox("Encrypt");grid.addWidget(self.enc_cb,2,0,1,2);self.enc_pw=QLineEdit();self.enc_pw.setPlaceholderText("Encrypt Pwd");self.enc_pw.setEchoMode(QLineEdit.Password);self.enc_pw.setEnabled(False);grid.addWidget(self.enc_pw,3,0,1,2);self.enc_cb.toggled.connect(self.enc_pw.setEnabled);self.layout.addLayout(grid);self.populate_disks()
-    def populate_disks(self):
-        cur=self.cfg.get('harddrives',[None])[0]; self.dc.clear(); self.devs=get_block_devices_info()
-        # --- CORRECTED INDENTATION for 'if not self.devs:' ---
-        if not self.devs:
-            self.dc.addItem("No disks found.")
-            self.dc.setEnabled(False)
-            # self.disk_info_label was removed in condensation, maybe add back if needed
-            return # Exit early if no devices
-        # --- End Correction ---
-        self.dc.setEnabled(True); sel=0
-        for i,d in enumerate(self.devs): sz=d.get('size',0)/(1024**3); self.dc.addItem(f"{d['name']} ({sz:.1f}GB)",d['name']);
-        if d['name']==cur: sel=i
-        if self.dc.count()>0: self.dc.setCurrentIndex(sel)
-    def load(self): self.populate_disks(); self.fs.setCurrentText(self.cfg.get('disk_filesystem',DEFAULT_CONFIG['disk_config']['filesystem'])); enc=self.cfg.get('disk_encryption')is not None; self.enc_cb.setChecked(enc); self.enc_pw.setEnabled(enc); self.enc_pw.clear()
-    def save(self):
-        if self.dc.currentIndex()<0 or not self.dc.currentData(): QMessageBox.warning(self,"","Select disk."); return False
-        disk=self.dc.currentData(); self.cfg['harddrives']=[disk]; fs=self.fs.currentText(); self.cfg['disk_filesystem']=fs
-        self.cfg['disk_encrypt']=self.enc_cb.isChecked()
-        if self.cfg['disk_encrypt']: pw=self.enc_pw.text();
-                                     if len(pw)<8: QMessageBox.warning(self,"","Encrypt pwd >= 8 chars."); return False
-                                     self.cfg['disk_encrypt_password']=pw
-        else: self.cfg.pop('disk_encrypt_password',None)
-        return True
-class UserSection(ConfigSectionWidget): # (Condensed)
-    def __init__(self,c,m):super().__init__("👤 User & Hostname",c,m);grid=QGridLayout();grid.setSpacing(10);grid.addWidget(QLabel("Hostname:"),0,0);self.hn=QLineEdit();grid.addWidget(self.hn,0,1);grid.addWidget(QLabel("Root Pwd:"),1,0);self.rp=QLineEdit();self.rp.setEchoMode(QLineEdit.Password);grid.addWidget(self.rp,1,1);grid.addWidget(QLabel("Confirm:"),2,0);self.rpc=QLineEdit();self.rpc.setEchoMode(QLineEdit.Password);grid.addWidget(self.rpc,2,1);grid.addWidget(QLabel("Username:"),3,0);self.un=QLineEdit();self.un.setPlaceholderText("Optional");grid.addWidget(self.un,3,1);grid.addWidget(QLabel("User Pwd:"),4,0);self.up=QLineEdit();self.up.setEchoMode(QLineEdit.Password);grid.addWidget(self.up,4,1);grid.addWidget(QLabel("Confirm:"),5,0);self.upc=QLineEdit();self.upc.setEchoMode(QLineEdit.Password);grid.addWidget(self.upc,5,1);self.sudo=QCheckBox("Admin");grid.addWidget(self.sudo,6,0,1,2);self.layout.addLayout(grid)
-    def load(self):self.hn.setText(self.cfg.get('hostname',DEFAULT_CONFIG['hostname']));users=self.cfg.get('!users',[]);self.un.setText(users[0]['username']if users else'');self.sudo.setChecked(users[0]['sudo']if users else True);self.rp.clear();self.rpc.clear();self.up.clear();self.upc.clear()
-    def save(self):hn=self.hn.text().strip();rp=self.rp.text();usr=self.un.text().strip();up=self.up.text();
-                 if not hn: QMessageBox.warning(self,"","Need hostname."); return False
-                 if len(rp)<8 or rp!=self.rpc.text(): QMessageBox.warning(self,"","Root pwd err."); return False
-                 self.cfg['hostname']=hn; self.cfg['!root-password']=rp; users=[]
-                 if usr:
-                     if len(up)<8 or up!=self.upc.text(): QMessageBox.warning(self,"","User pwd err."); return False
-                     users.append({'username':usr,'password':up,'sudo':self.sudo.isChecked()})
-                 self.cfg['!users']=users; self.cfg.pop('user_password',None); self.cfg.pop('root_password',None); self.cfg.pop('username',None); self.cfg.pop('user_sudo',None); return True # Clean up temp keys
-class ProfileAppsSection(ConfigSectionWidget): # (Condensed)
-     def __init__(self,c,m):super().__init__("🖥️ Profile & Apps",c,m);layout=QVBoxLayout();layout.setSpacing(10);layout.addWidget(QLabel("Profile:"));self.cb=QComboBox();self.profs=get_profiles();[self.cb.addItem(p['desc'],p['name'])for p in self.profs];layout.addWidget(self.cb);layout.addWidget(QLabel("Categories:"));self.cats={"Prog":"💻","Game":"🎮","Office":"📄","Graphics":"🎨"};self.cbs={};grid=QGridLayout();r,c=0,0;
-                                for n,e in self.cats.items():chk=QCheckBox(f"{e}{n}");self.cbs[n]=chk;grid.addWidget(chk,r,c);c+=1;
-                                if c>=2:c=0;r+=1
-                                layout.addLayout(grid);self.layout.addLayout(layout)
-     def load(self):idx=self.cb.findData(self.cfg.get('profile',DEFAULT_CONFIG['profile']));self.cb.setCurrentIndex(idx if idx!=-1 else 0);sel=self.cfg.get('_app_categories',[]);[cb.setChecked(n in sel)for n,cb in self.cbs.items()]
-     def save(self):self.cfg['profile']=self.cb.currentData()or(self.profs[0]['name']if self.profs else None);self.cfg['_app_categories']=[n for n,cb in self.cbs.items() if cb.isChecked()];return True
+            self.installation_log.emit(f"Using configuration: {json.dumps(self.config, indent=2)}")
+
+            # --- Alternative: Using archinstall as a command-line tool ---
+            # This is generally more robust if the library API is not stable
+            # or easy to use directly for all necessary steps.
+            with open(self.script_path, 'w') as f:
+                json.dump(self.config, f, indent=4)
+
+            self.installation_log.emit(f"Archinstall configuration saved to {self.script_path}")
+            self.installation_log.emit("Starting Arch Linux installation process via archinstall CLI...")
+            self.installation_log.emit("This may take a while. Please be patient.")
+
+            # Ensure archinstall is in PATH or provide full path
+            # The exact command might vary based on how you want to control archinstall
+            # --config is a common way to pass settings.
+            # --dry-run is extremely useful for testing!
+            # You might need to run `archinstall --script guided` and see what kind of JSON
+            # it expects or how it structures its settings.
+            #
+            # For a real programmatic approach, you would replace this subprocess call
+            # with direct calls to archinstall's Python functions/classes.
+
+            # Example command (you WILL need to adjust this):
+            cmd = ["archinstall", "--config", self.script_path, "--silent"] # Add --dry-run for testing
+            # cmd = ["python", "-m", "archinstall", "--config", self.script_path, "--silent"]
+
+
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+            while True:
+                output = process.stdout.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output:
+                    self.installation_log.emit(output.strip())
+
+            stderr_output = process.stderr.read()
+            if stderr_output:
+                 self.installation_log.emit(f"Archinstall STDERR:\n{stderr_output}")
+
+            ret_code = process.wait()
+
+            if ret_code == 0:
+                self.installation_log.emit("Archinstall process completed successfully.")
+                self.installation_finished.emit(True, "Arch Linux installation successful!")
+            else:
+                error_msg = f"Archinstall process failed with error code {ret_code}.\n{stderr_output}"
+                self.installation_log.emit(error_msg)
+                self.installation_finished.emit(False, error_msg)
+
+        except Exception as e:
+            self.installation_log.emit(f"An error occurred: {str(e)}")
+            self.installation_finished.emit(False, f"An unexpected error occurred: {str(e)}")
+        finally:
+            if os.path.exists(self.script_path):
+                os.remove(self.script_path)
+
+
+class PostInstallThread(QThread):
+    post_install_finished = pyqtSignal(bool, str)
+    post_install_log = pyqtSignal(str)
+
+    def __init__(self, script_path, target_mount_point="/mnt/archinstall"): # Adjust mount point as needed
+        super().__init__()
+        self.script_path = script_path
+        self.target_mount_point = target_mount_point
+
+    def run(self):
+        if not self.script_path or not os.path.exists(self.script_path):
+            self.post_install_log.emit("Post-install script not provided or not found.")
+            self.post_install_finished.emit(True, "No post-install script executed.") # Not a failure of this thread
+            return
+
+        try:
+            self.post_install_log.emit(f"Running post-installation script: {self.script_path}")
+            # To run a script *inside* the new system, you'd typically use arch-chroot.
+            # The script needs to be copied into the target system first, or accessed from it.
+
+            # Simplistic approach: directly execute if not chrooting (e.g. script handles chroot)
+            # More robust: copy script to target, then arch-chroot
+            # For now, let's assume the script can be run from the installer environment
+            # and knows how to target the installed system (e.g., by taking target_mount_point as an arg)
+
+            # Example: Run script with bash, pass target mount point
+            # The script itself needs to be aware it's running on the installed system or use chroot
+            # This is a simplified call; a real chroot execution is more involved:
+            # cmd = ["arch-chroot", self.target_mount_point, "/bin/bash", "-c", f"/path/to/script/in/chroot_env/your_script.sh"]
+            # For now, let's just execute it. The script needs to be designed to work this way or
+            # your Python code needs to handle the chrooting.
+
+            # Make sure the script is executable
+            subprocess.run(["chmod", "+x", self.script_path], check=True)
+
+            # Run the script. It's often better to make the script itself handle chrooting
+            # or expect its paths to be relative to the installed system if run via arch-chroot.
+            # If running directly, it needs to know the mount point.
+            self.post_install_log.emit(f"Executing: bash {self.script_path} {self.target_mount_point}")
+            process = subprocess.Popen(["bash", self.script_path, self.target_mount_point],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+            while True:
+                output = process.stdout.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output:
+                    self.post_install_log.emit(output.strip())
+
+            stderr_output = process.stderr.read()
+            if stderr_output:
+                 self.post_install_log.emit(f"Post-install script STDERR:\n{stderr_output}")
+
+            ret_code = process.wait()
+
+            if ret_code == 0:
+                self.post_install_log.emit("Post-installation script executed successfully.")
+                self.post_install_finished.emit(True, "Post-installation script finished.")
+            else:
+                error_msg = f"Post-installation script failed with error code {ret_code}.\n{stderr_output}"
+                self.post_install_log.emit(error_msg)
+                self.post_install_finished.emit(False, error_msg)
+
+        except Exception as e:
+            self.post_install_log.emit(f"Error running post-install script: {str(e)}")
+            self.post_install_finished.emit(False, f"Error running post-install script: {str(e)}")
+
 
 # --- Main Application Window ---
-class MaiBloomOSInstallerWindow(QMainWindow):
-    def __init__(self): super().__init__(); self.cfg=DEFAULT_CONFIG.copy(); self.inst_thread=None; self.init_ui()
-    def init_ui(self): self.setWindowTitle(f"{APP_NAME}"); self.setMinimumSize(1000,700); # Slightly smaller min width
-                   if os.path.exists(LOGO_PATH): self.setWindowIcon(QIcon(LOGO_PATH));
-                   central=QWidget(); self.setCentralWidget(central); main_layout=QVBoxLayout(central); self.setup_menus();
-                   splitter=QSplitter(Qt.Horizontal); scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll_w=QWidget(); scroll_l=QVBoxLayout(scroll_w); scroll_l.setSpacing(15); scroll_l.setContentsMargins(15,15,15,15);
-                   self.sections=[LocaleKeyboardSection(self.cfg,self),DiskSection(self.cfg,self),UserSection(self.cfg,self),ProfileAppsSection(self.cfg,self)]; # Add all sections
-                   for sec in self.sections: scroll_l.addWidget(sec)
-                   scroll_l.addStretch(1); scroll.setWidget(scroll_w); splitter.addWidget(scroll); self.log=QPlainTextEdit(); self.log.setReadOnly(True); log_f=QFontDatabase.systemFont(QFontDatabase.FixedFont);log_f.setPointSize(9);self.log.setFont(log_f); splitter.addWidget(self.log); splitter.setSizes([500,500]); splitter.setStretchFactor(0,1); splitter.setStretchFactor(1,1); main_layout.addWidget(splitter,1); btn_layout=QHBoxLayout(); btn_layout.addStretch(1); self.inst_btn=QPushButton("🚀 Install"); self.inst_btn.clicked.connect(self.confirm_start); btn_layout.addWidget(self.inst_btn); main_layout.addLayout(btn_layout); self.log_append(f"{APP_NAME} ready.","INFO"); self.apply_theme(); self.load_all()
-    def setup_menus(self): menu=self.menuBar();fm=menu.addMenu("&File");ex=QAction("E&xit",self);ex.triggered.connect(self.close);fm.addAction(ex);hm=menu.addMenu("&Help");ab=QAction("&About",self);ab.triggered.connect(self.about);hm.addAction(ab)
-    def about(self): QMessageBox.about(self,f"About",f"<b>{APP_NAME}</b><p>Installer.")
-    def apply_theme(self): self.setStyleSheet(DARK_THEME_QSS); self.log.setObjectName("LogOutput"); self.inst_btn.setObjectName("InstallButton")
-    def load_all(self): self.log_append("Loading config...","DEBUG"); [sec.load() for sec in self.sections]
-    def save_all(self): self.log_append("Saving config...","DEBUG");
-                      for sec in self.sections:
-                          if not sec.save(): self.log_append(f"Validation failed: {sec.title()}","ERROR"); QMessageBox.warning(self,"Error",f"Check '{sec.title()}'."); return False
-                      self.log_append("Config saved.","INFO"); return True
-    def confirm_start(self):
-        if not self.save_all(): return
-        summary="\n".join([f"- {k}: {'<set>'if'pass'in k else self.cfg.get(k)}" for k in ['locale','keyboard_layout','harddrives','hostname','profile'] if k in self.cfg]) # Basic summary
-        if QMessageBox.question(self,"Confirm Install",f"Start install?\n{summary}\n\n<font color='red'><b>WIPES DISK!</b></font>",QMessageBox.Yes|QMessageBox.No,QMessageBox.No)==QMessageBox.Yes: self.start_install()
-    def start_install(self): self.log_append("Starting install thread...","INFO"); self.inst_btn.setEnabled(False); self.inst_thread=InstallationThread(self.cfg.copy()); self.inst_thread.log_signal.connect(lambda m:self.log_append(m,"INSTALL")); self.inst_thread.finished_signal.connect(self.on_install_done); self.inst_thread.start() # Add progress later
-    def on_install_done(self, suc, msg): self.log_append(f"Install Done: Success={suc}","RESULT"); self.inst_btn.setEnabled(True);
-                                      if suc: QMessageBox.information(self,"Complete",f"{self.cfg.get('os_name',APP_NAME)} install OK.\nReboot.")
-                                      else: QMessageBox.critical(self,"Failed", msg+"\nCheck logs.")
-    def log_append(self, txt, lvl="DEBUG"): ts=time.strftime("%H:%M:%S"); self.log.appendPlainText(f"[{ts}][{lvl.upper()}] {txt}"); sb=self.log.verticalScrollBar();sb.setValue(sb.maximum()); QApplication.processEvents()
-    def closeEvent(self, event): busy=(self.inst_thread and self.inst_thread.isRunning());
-                          if busy and QMessageBox.question(self,"Exit","Install running. Abort?",QMessageBox.Yes|QMessageBox.No,QMessageBox.No)==QMessageBox.Yes: self.log_append("User aborted.","WARN"); event.accept()
-                          elif not busy: super().closeEvent(event)
-                          else: event.ignore()
+class MaiBloomInstallerApp(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.archinstall_config = {}
+        self.post_install_script_path = ""
+        self.init_ui()
 
-# --- Main Execution ---
+    def init_ui(self):
+        self.setWindowTitle('Mai Bloom OS Installer')
+        self.setGeometry(100, 100, 700, 500) # Increased height for log
+
+        layout = QVBoxLayout()
+
+        # --- Basic Settings ---
+        layout.addWidget(QLabel("<b>Welcome to Mai Bloom OS Installation!</b>"))
+
+        # Hostname
+        self.hostname_input = QLineEdit()
+        self.hostname_input.setPlaceholderText("my-arch-pc")
+        layout.addLayout(self.create_form_row("Hostname:", self.hostname_input))
+
+        # Username
+        self.username_input = QLineEdit()
+        self.username_input.setPlaceholderText("bloomuser")
+        layout.addLayout(self.create_form_row("Username:", self.username_input))
+
+        # Password
+        self.password_input = QLineEdit()
+        self.password_input.setEchoMode(QLineEdit.Password)
+        layout.addLayout(self.create_form_row("Password:", self.password_input))
+
+        # Confirm Password
+        self.confirm_password_input = QLineEdit()
+        self.confirm_password_input.setEchoMode(QLineEdit.Password)
+        layout.addLayout(self.create_form_row("Confirm Password:", self.confirm_password_input))
+
+        # Locale (Simplified)
+        self.locale_input = QLineEdit("en_US.UTF-8")
+        layout.addLayout(self.create_form_row("Locale:", self.locale_input))
+
+        # Keyboard Layout (Simplified)
+        self.keyboard_layout_input = QLineEdit("us")
+        layout.addLayout(self.create_form_row("Keyboard Layout:", self.keyboard_layout_input))
+
+        # Disk (Highly Simplified - In reality, this is complex!)
+        # A real implementation needs to list available disks (e.g. lsblk)
+        # and allow partitioning choices. For KISS, we'll just ask for the device.
+        self.disk_input = QLineEdit()
+        self.disk_input.setPlaceholderText("/dev/sda or /dev/nvme0n1")
+        layout.addLayout(self.create_form_row("Target Disk:", self.disk_input))
+        layout.addWidget(QLabel("<small><b>Warning:</b> All data on the selected disk will be erased. "
+                                "This is a simplified example. Ensure you select the correct disk.</small>"))
+
+        # Wipe disk checkbox
+        self.wipe_disk_checkbox = QCheckBox("Wipe selected disk (Format)")
+        self.wipe_disk_checkbox.setChecked(True) # Default to wipe for simplicity
+        layout.addWidget(self.wipe_disk_checkbox)
+
+
+        # Desktop Environment/Profile
+        self.profile_combo = QComboBox()
+        # These profiles need to match what archinstall supports
+        # You can get these using `archinstall --show-profiles` or similar introspection
+        # Or by checking archinstall.Installer().profiles
+        # Example profiles:
+        self.profile_combo.addItems(["kde", "gnome", "xfce4", "minimal", "server"])
+        layout.addLayout(self.create_form_row("Desktop/Profile:", self.profile_combo))
+
+        # Post-install script
+        self.post_install_script_button = QPushButton("Select Post-Install Script (Optional)")
+        self.post_install_script_button.clicked.connect(self.select_post_install_script)
+        self.post_install_script_label = QLabel("No script selected.")
+        script_layout = QHBoxLayout()
+        script_layout.addWidget(self.post_install_script_button)
+        script_layout.addWidget(self.post_install_script_label)
+        layout.addLayout(script_layout)
+
+        # --- Installation Log ---
+        layout.addWidget(QLabel("<b>Installation Log:</b>"))
+        self.log_output = QTextEdit()
+        self.log_output.setReadOnly(True)
+        layout.addWidget(self.log_output)
+
+
+        # Install Button
+        self.install_button = QPushButton("Start Installation")
+        self.install_button.setStyleSheet("background-color: lightgreen; padding: 10px;")
+        self.install_button.clicked.connect(self.start_installation_process)
+        layout.addWidget(self.install_button)
+
+        self.setLayout(layout)
+
+    def create_form_row(self, label_text, widget):
+        row_layout = QHBoxLayout()
+        label = QLabel(label_text)
+        label.setFixedWidth(150) # Adjust for consistent alignment
+        row_layout.addWidget(label)
+        row_layout.addWidget(widget)
+        return row_layout
+
+    def select_post_install_script(self):
+        options = QFileDialog.Options()
+        filePath, _ = QFileDialog.getOpenFileName(self, "Select Post-Installation Bash Script", "",
+                                                  "Bash Scripts (*.sh);;All Files (*)", options=options)
+        if filePath:
+            self.post_install_script_path = filePath
+            self.post_install_script_label.setText(os.path.basename(filePath))
+            self.log_output.append(f"Post-install script selected: {filePath}")
+
+    def update_log(self, message):
+        self.log_output.append(message)
+        QApplication.processEvents() # Keep UI responsive
+
+    def start_installation_process(self):
+        if not check_root():
+            QMessageBox.critical(self, "Error", "This application must be run as root (or with sudo).")
+            return
+
+        # --- Basic Validation ---
+        hostname = self.hostname_input.text().strip()
+        username = self.username_input.text().strip()
+        password = self.password_input.text()
+        confirm_password = self.confirm_password_input.text()
+        locale = self.locale_input.text().strip()
+        kb_layout = self.keyboard_layout_input.text().strip()
+        disk = self.disk_input.text().strip()
+        profile = self.profile_combo.currentText()
+        wipe_disk = self.wipe_disk_checkbox.isChecked()
+
+        if not all([hostname, username, password, locale, kb_layout, disk]):
+            QMessageBox.warning(self, "Input Error", "Please fill in all required fields.")
+            return
+
+        if password != confirm_password:
+            QMessageBox.warning(self, "Input Error", "Passwords do not match.")
+            return
+
+        if not disk.startswith("/dev/"):
+             QMessageBox.warning(self, "Input Error", "Disk path should be like /dev/sda, /dev/nvme0n1, etc.")
+             return
+
+        # --- Confirmation ---
+        reply = QMessageBox.question(self, 'Confirm Installation',
+                                     f"This will install Arch Linux on <b>{disk}</b> with hostname <b>{hostname}</b>.\n"
+                                     f"<b>ALL DATA ON {disk} WILL BE ERASED if 'Wipe selected disk' is checked!</b>\n"
+                                     "Are you sure you want to proceed?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+
+        if reply == QMessageBox.No:
+            self.log_output.append("Installation cancelled by user.")
+            return
+
+        self.install_button.setEnabled(False)
+        self.log_output.clear()
+        self.log_output.append("Starting installation...")
+
+
+        # --- Prepare archinstall configuration ---
+        # This structure needs to align with what archinstall's --config option expects
+        # or how its Python API functions. This is a *guess* and will need adjustment.
+        # You should generate a config using `archinstall --script guided` and then
+        # inspect the generated JSON to understand the structure.
+        self.archinstall_config = {
+            "hostname": hostname,
+            "locale_config": {
+                "kb_layout": kb_layout,
+                "sys_enc": "UTF-8", # Common default
+                "sys_lang": locale
+            },
+            "disk_config": {
+                # This is highly simplified. Real disk config is complex.
+                # It involves partitioning, file systems, mount options, etc.
+                # Archinstall's guided setup usually creates a more detailed structure.
+                "block_devices": [disk], # This assumes a single disk, simple layout
+                # A more realistic config would specify partitions, filesystems, etc.
+                # For example:
+                # "disk_layouts": {
+                #     disk: {
+                #         "wipe": wipe_disk,
+                #         "layout_type": "auto" # or specific partition details
+                #     }
+                # }
+                # The 'auto' layout might be the simplest to invoke if archinstall supports it this way.
+                # Or you might need to define partitions explicitly.
+                # Let's assume a simplified structure that `archinstall` might accept
+                # or that your Python library calls will translate.
+            },
+            "bootloader": "systemd-boot", # Or "grub-install" - depends on BIOS/UEFI
+            "swap": True, # Let archinstall decide size or make it configurable
+            "profile_config": { # This part is very dependent on archinstall version
+                "profile": {"main": profile} # Check archinstall source for exact structure
+            },
+            "users": [
+                {
+                    "username": username,
+                    "password": password,
+                    "sudo": True
+                }
+            ],
+            "kernels": ["linux"], # Default kernel
+            "network_config": { # Basic DHCP configuration
+                "type": "nm", # NetworkManager
+            },
+            # Potentially other settings: audio, timezone, etc.
+            "timezone": "UTC", # Make this configurable
+            "silent": False, # If True, archinstall might not show its own TUI prompts
+            # "!users": [{"username": username, "password": password, "sudo": True}], # Common way to structure in older JSONs
+            # "!hostname": hostname,
+            # "locale": locale,
+            # "keyboard-layout": kb_layout,
+            # "disk": disk, # This might be a simplified top-level key in some contexts
+            # "profile": profile,
+            # "harddrives": [disk], # Another way it might be specified
+        }
+
+        # Add partitioning related details if wipe is selected
+        # This part is CRITICAL and needs to match `archinstall`'s expectations.
+        # The `archinstall` command typically handles partitioning interactively or via
+        # a detailed configuration in the JSON. Simulating "auto-partition and format"
+        # might look something like this, but this is a MAJOR GUESS.
+        if wipe_disk:
+            self.archinstall_config['disk_config']['disk_layouts'] = {
+                disk: {
+                    "wipe": True,
+                    "layout_type": "auto" # Ask archinstall to auto-partition
+                }
+            }
+        else:
+            # If not wiping, the user must have pre-partitioned.
+            # The config would need to describe the existing partitions to use.
+            # This is too complex for a KISS example.
+            self.log_output.append("WARN: Not wiping disk. Manual partitioning is assumed and NOT handled by this GUI.")
+            # Potentially, you'd remove `disk_layouts` or set `wipe: False` and specify partitions.
+
+        # Forcing UEFI or BIOS - this is important
+        # You'd need a way to detect this or ask the user.
+        # self.archinstall_config["efi"] = True # or False
+
+        self.log_output.append("Configuration prepared (simplified for this example):")
+        self.log_output.append(json.dumps(self.archinstall_config, indent=2))
+
+        # --- Start Archinstall in a separate thread ---
+        self.installer_thread = ArchinstallThread(self.archinstall_config)
+        self.installer_thread.installation_log.connect(self.update_log)
+        self.installer_thread.installation_finished.connect(self.on_installation_finished)
+        self.installer_thread.start()
+
+    def on_installation_finished(self, success, message):
+        self.update_log(message)
+        if success:
+            QMessageBox.information(self, "Installation Complete", "Arch Linux installation finished successfully!")
+            if self.post_install_script_path:
+                self.run_post_install_script()
+            else:
+                self.install_button.setEnabled(True)
+                self.log_output.append("No post-installation script to run.")
+        else:
+            QMessageBox.critical(self, "Installation Failed", f"Arch Linux installation failed.\n{message}")
+            self.install_button.setEnabled(True)
+
+    def run_post_install_script(self):
+        self.log_output.append("\n--- Starting Post-Installation Script ---")
+        self.post_installer_thread = PostInstallThread(self.post_install_script_path)
+        self.post_installer_thread.post_install_log.connect(self.update_log)
+        self.post_installer_thread.post_install_finished.connect(self.on_post_install_finished)
+        self.post_installer_thread.start()
+
+    def on_post_install_finished(self, success, message):
+        self.update_log(message)
+        if success:
+            QMessageBox.information(self, "Post-Install Complete", "Post-installation script finished.")
+        else:
+            QMessageBox.warning(self, "Post-Install Issue", f"Post-installation script reported issues or failed.\n{message}")
+        self.install_button.setEnabled(True)
+        self.log_output.append("Mai Bloom OS setup process finished.")
+
+
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    if not os.path.exists(LOGO_PATH): print(f"Warning: Logo '{LOGO_FILENAME}' missing.")
-    # Root and archinstall checks are at the top
-    main_win = MaiBloomOSInstallerWindow()
-    main_win.show()
+    installer = MaiBloomInstallerApp()
+    installer.show()
     sys.exit(app.exec_())
 
