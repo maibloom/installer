@@ -25,6 +25,7 @@ def check_root():
     return os.geteuid() == 0
 
 # --- Archinstall Interaction Thread (JSON + CLI) ---
+# No changes needed in ArchinstallThread itself from the previous JSON version
 class ArchinstallThread(QThread):
     installation_finished = pyqtSignal(bool, str)
     installation_log = pyqtSignal(str)
@@ -37,13 +38,14 @@ class ArchinstallThread(QThread):
     def run(self):
         try:
             self.installation_log.emit("Preparing archinstall JSON configuration...")
-            # Ensure silent is set for non-interactive run
-            self.config_data['silent'] = True 
+            # Ensure silent=True is in the config for non-interactive run
+            self.config_data['silent'] = True
             with open(self.config_file_path, 'w') as f:
                 json.dump(self.config_data, f, indent=2)
 
             self.installation_log.emit(f"Archinstall JSON configuration saved to {self.config_file_path}")
-            self.installation_log.emit(f"Full JSON configuration:\n{json.dumps(self.config_data, indent=2)}")
+            # Optionally log the config only if needed for debugging, can be verbose
+            # self.installation_log.emit(f"Full JSON configuration:\n{json.dumps(self.config_data, indent=2)}")
             self.installation_log.emit("Starting Arch Linux installation process via archinstall CLI...")
             self.installation_log.emit("This may take a while. Please be patient.")
 
@@ -51,11 +53,16 @@ class ArchinstallThread(QThread):
 
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, universal_newlines=True)
 
+            # Stream stdout
+            stdout_lines = []
             if process.stdout:
                 for line in iter(process.stdout.readline, ''):
-                    self.installation_log.emit(line.strip())
+                    line_strip = line.strip()
+                    self.installation_log.emit(line_strip)
+                    stdout_lines.append(line_strip) # Keep history if needed
                 process.stdout.close()
 
+            # Capture stderr
             stderr_output = ""
             if process.stderr:
                 stderr_output = process.stderr.read()
@@ -69,9 +76,25 @@ class ArchinstallThread(QThread):
                 self.installation_log.emit("Archinstall process completed successfully.")
                 self.installation_finished.emit(True, "Arch Linux installation successful!")
             else:
-                error_msg = f"Archinstall process failed with error code {ret_code}.\n{stderr_output}"
-                self.installation_log.emit(error_msg)
-                self.installation_finished.emit(False, error_msg)
+                # Combine error code and stderr for the message
+                error_msg = f"Archinstall process failed with error code {ret_code}."
+                # Add last few lines of stderr containing the error if available
+                traceback_lines = [line for line in stderr_output.strip().split('\n') if line]
+                if traceback_lines:
+                     error_msg += f"\nRelevant error output:\n---\n"
+                     error_msg += "\n".join(traceback_lines[-15:]) # Show last 15 lines
+                     error_msg += "\n---"
+                else:
+                    # Fallback to stdout if stderr was empty but process failed
+                     error_msg += f"\nLast output lines:\n---\n"
+                     error_msg += "\n".join(stdout_lines[-10:])
+                     error_msg += "\n---"
+
+                self.installation_log.emit(error_msg) # Log full error details
+                # Provide a slightly shorter message for the popup
+                popup_error_msg = f"Archinstall process failed with error code {ret_code}.\nSee log for details."
+                self.installation_finished.emit(False, popup_error_msg)
+
 
         except FileNotFoundError:
             err_msg = "Error: `archinstall` command not found. Is it installed and in your PATH?"
@@ -137,7 +160,7 @@ class PostInstallThread(QThread):
                 try: os.remove(target_script_path); self.post_install_log.emit(f"Cleaned up: {target_script_path}") # type: ignore
                 except OSError as e: self.post_install_log.emit(f"Warning: Could not remove {target_script_path}: {e}") # type: ignore
 
-# MaiBloomInstallerApp UI structure remains the same
+# GUI Class remains the same structure
 class MaiBloomInstallerApp(QWidget):
     def __init__(self):
         super().__init__()
@@ -145,6 +168,7 @@ class MaiBloomInstallerApp(QWidget):
         self.post_install_script_path = ""
         self.init_ui()
 
+    # init_ui remains the same (with log on right)
     def init_ui(self):
         self.setWindowTitle('Mai Bloom OS Installer')
         self.setGeometry(100, 100, 850, 700)
@@ -166,9 +190,9 @@ class MaiBloomInstallerApp(QWidget):
         self.disk_combo.setToolTip("Select the target disk. <b>ALL DATA WILL BE ERASED if 'Wipe Disk' is checked.</b>")
         disk_layout_vbox.addLayout(self.create_form_row("Target Disk:", self.disk_combo))
         disk_layout_vbox.addWidget(QLabel("<small>Ensure correct disk selection. This is irreversible if 'Wipe Disk' is checked.</small>"))
-        self.wipe_disk_checkbox = QCheckBox("Wipe selected disk (Auto-partition & Format)")
+        self.wipe_disk_checkbox = QCheckBox("Wipe selected disk (Uses archinstall's default auto-partitioning)") # Tooltip updated
         self.wipe_disk_checkbox.setChecked(True)
-        self.wipe_disk_checkbox.setToolTip("Wipes disk and creates Boot, Root, (+ Home) partitions.\nUncheck to use pre-existing partitions (advanced, requires manual setup).")
+        self.wipe_disk_checkbox.setToolTip("Wipes disk and lets archinstall create its default layout (e.g., Boot, Root, Home).\nUncheck to use pre-existing partitions (advanced, requires manual setup).")
         disk_layout_vbox.addWidget(self.wipe_disk_checkbox)
         disk_group.setLayout(disk_layout_vbox)
         controls_layout.addWidget(disk_group)
@@ -237,7 +261,7 @@ class MaiBloomInstallerApp(QWidget):
         self.scan_and_populate_disks()
 
     def create_form_row(self, label_text, widget):
-        row_layout = QHBoxLayout(); label = QLabel(label_text); label.setFixedWidth(120) 
+        row_layout = QHBoxLayout(); label = QLabel(label_text); label.setFixedWidth(120)
         row_layout.addWidget(label); row_layout.addWidget(widget); return row_layout
 
     def scan_and_populate_disks(self):
@@ -245,23 +269,25 @@ class MaiBloomInstallerApp(QWidget):
         QApplication.processEvents()
         self.disk_combo.clear()
         try:
-            result = subprocess.run(['lsblk', '-J', '-b', '-o', 'NAME,SIZE,TYPE,MODEL,PATH,TRAN,PKNAME,FSTYPE,MOUNTPOINT'],
+            # Use lsblk to get disk info including size in bytes
+            result = subprocess.run(['lsblk', '-J', '-b', '-o', 'NAME,SIZE,TYPE,MODEL,PATH,TRAN,PKNAME'],
                                     capture_output=True, text=True, check=True)
             data = json.loads(result.stdout)
             disks_found = 0
             for device in data.get('blockdevices', []):
+                # Filter for actual disks (no PKNAME), exclude loop, rom, and potentially USB for safety
                 if device.get('type') == 'disk' and not device.get('pkname') and device.get('tran') not in ['usb']:
                     name = f"/dev/{device.get('name', 'N/A')}"
                     model = device.get('model', 'Unknown Model')
                     size_bytes = int(device.get('size', 0))
                     size_gb = size_bytes / (1024**3)
                     display_text = f"{name} - {model} ({size_gb:.2f} GB)"
+                    # Store path and size_bytes in userData
                     self.disk_combo.addItem(display_text, userData={"path": name, "size_bytes": size_bytes})
                     self.log_output.append(f"Found disk: {display_text}")
                     disks_found += 1
             if disks_found == 0:
-                self.log_output.append("No suitable disks found or lsblk error.")
-                QMessageBox.warning(self, "Disk Scan", "No suitable disks found.")
+                self.log_output.append("No suitable non-USB disks found or lsblk error."); QMessageBox.warning(self, "Disk Scan", "No suitable disks found.")
             else:
                 self.log_output.append(f"Disk scan complete. Found {disks_found} disk(s).")
         except FileNotFoundError:
@@ -270,6 +296,7 @@ class MaiBloomInstallerApp(QWidget):
             self.log_output.append(f"Error scanning disks: {e.stderr}"); QMessageBox.warning(self, "Disk Scan Error", f"Could not scan disks: {e.stderr}")
         except json.JSONDecodeError:
             self.log_output.append("Error parsing disk information."); QMessageBox.warning(self, "Disk Scan Error", "Failed to parse disk info.")
+
 
     def select_post_install_script(self):
         options = QFileDialog.Options()
@@ -283,10 +310,10 @@ class MaiBloomInstallerApp(QWidget):
 
     def update_log(self, message):
         self.log_output.append(message)
-        self.log_output.ensureCursorVisible(); QApplication.processEvents() 
+        self.log_output.ensureCursorVisible(); QApplication.processEvents()
 
+    # start_installation_process MODIFIED for simplified JSON disk_config
     def start_installation_process(self):
-        # --- Collect GUI Data ---
         hostname = self.hostname_input.text().strip()
         username = self.username_input.text().strip()
         password = self.password_input.text()
@@ -298,29 +325,27 @@ class MaiBloomInstallerApp(QWidget):
         profile_name = self.profile_combo.currentText()
         wipe_disk_checked = self.wipe_disk_checkbox.isChecked()
 
-        # --- Validate Inputs ---
-        if selected_disk_index < 0: 
+        if selected_disk_index < 0:
             QMessageBox.warning(self, "Input Error", "Please select a target disk."); return
         disk_data = self.disk_combo.itemData(selected_disk_index)
         if not disk_data or "path" not in disk_data or "size_bytes" not in disk_data:
             QMessageBox.critical(self, "Disk Error", "Selected disk data is invalid. Please re-scan disks."); return
         disk_path_str = disk_data["path"]
-        disk_size_bytes = disk_data["size_bytes"]
-        
+        disk_size_bytes = disk_data["size_bytes"] # We have size now, but won't use for partition definition
+
         if not all([hostname, username, password, locale_str, kb_layout, disk_path_str, timezone]):
             QMessageBox.warning(self, "Input Error", "Please fill in all required fields."); return
         if password != confirm_password:
             QMessageBox.warning(self, "Input Error", "Passwords do not match."); return
 
-        # --- Confirm with User ---
         confirm_msg_detail = f"<b>TARGET DISK: {disk_path_str}</b> ({disk_size_bytes / (1024**3):.2f} GB)\n"
         confirm_msg_detail += f"Hostname: {hostname}, Profile: {profile_name}\n"
         if wipe_disk_checked:
-            confirm_msg_detail += f"<b>ALL DATA ON {disk_path_str} WILL BE ERASED and auto-partitioned!</b>\n"
+            confirm_msg_detail += f"<b>ALL DATA ON {disk_path_str} WILL BE ERASED. Archinstall will use its default partitioning scheme.</b>\n"
         else:
             confirm_msg_detail += f"<b>The disk {disk_path_str} will NOT be wiped. Using existing partitions (ADVANCED).</b>\n"
         confirm_msg_detail += "Are you absolutely sure you want to proceed?"
-        
+
         reply = QMessageBox.question(self, 'Confirm Installation', confirm_msg_detail, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.No:
             self.log_output.append("Installation cancelled by user."); return
@@ -328,106 +353,55 @@ class MaiBloomInstallerApp(QWidget):
         self.install_button.setEnabled(False); self.log_output.clear()
         self.log_output.append("Preparing JSON configuration for archinstall...")
 
-        # --- Build JSON Config Dictionary ---
         sys_lang_base = locale_str.split('.')[0] if '.' in locale_str else locale_str
         sys_enc = locale_str.split('.')[-1] if '.' in locale_str and locale_str.split('.')[-1] else "UTF-8"
         is_efi = os.path.exists("/sys/firmware/efi")
-        default_packages_for_nm = ["networkmanager"]
+        default_packages_for_nm = ["networkmanager"] # Ensure NM is installed if using networkmanager type
 
         self.archinstall_json_config_data = {
             "hostname": hostname,
             "kernels": ["linux"],
             "locale_config": {"sys_lang": sys_lang_base, "sys_enc": sys_enc, "kb_layout": kb_layout},
             "timezone": timezone,
-            "ntp": True, 
-            "swap": True, 
+            "ntp": True,
+            "swap": True, # Let archinstall manage swap file/partition creation with defaults
             "users": [{"username": username, "password": password, "sudo": True}],
-            "packages": [], # Populated below
-            "silent": True, # *** Ensure this is true for non-interactive ***
+            "packages": [],
+            "silent": True,
             "audio_config": {"audio": "pipewire"},
             "bootloader": "Systemd-boot" if is_efi else "Grub",
-            "network_config": {"type": "networkmanager"} 
+            "network_config": {"type": "networkmanager"}
+            # Omitting disk_config initially, will add based on wipe_disk_checked
         }
 
-        # Disk Configuration JSON
+        # Simplified disk_config generation
         if wipe_disk_checked:
-            partitions = []
-            current_offset_mib_val = 1 
-
-            if is_efi:
-                esp_size_mib_val = 512
-                # Basic check for minimum size
-                if (disk_size_bytes / (1024**2)) < (current_offset_mib_val + esp_size_mib_val + 20 * 1024): # Boot + min 20G Root
-                    QMessageBox.critical(self, "Disk Too Small", "Not enough space for EFI partition and minimal root."); self.install_button.setEnabled(True); return
-                partitions.append({
-                    "status": "create", "type": "primary", "fs_type": "fat32",
-                    # Removed sector_size key
-                    "start": {"unit": "MiB", "value": current_offset_mib_val}, 
-                    "size": {"unit": "MiB", "value": esp_size_mib_val}, 
-                    "mountpoint": "/boot", "flags": ["boot", "esp"]
-                })
-                current_offset_mib_val += esp_size_mib_val
-            # Simplification: Assume MBR if not EFI, handle boot flag on root. Skip explicit bios_grub for now.
-            
-            min_disk_for_layout_mib = current_offset_mib_val + (20 * 1024)
-            if (disk_size_bytes / (1024**2)) < min_disk_for_layout_mib:
-                QMessageBox.critical(self, "Disk Too Small", f"Disk too small for layout (needs > {min_disk_for_layout_mib / 1024:.1f} GiB).")
-                self.install_button.setEnabled(True); return
-
-            root_size_gib_val = 50
-            available_mib_after_boot = (disk_size_bytes / (1024**2)) - current_offset_mib_val
-            if available_mib_after_boot < (20 * 1024):
-                 QMessageBox.critical(self, "Disk Too Small", f"Not enough space for root partition ({available_mib_after_boot/1024:.1f} GiB avail)."); self.install_button.setEnabled(True); return
-            if available_mib_after_boot < (root_size_gib_val * 1024): root_size_gib_val = 20
-
-            root_flags = []
-            if not is_efi: root_flags.append("boot") # Assume MBR if not EFI, set boot flag on root
-
-            partitions.append({
-                "status": "create", "type": "primary", "fs_type": "ext4",
-                 # Removed sector_size key
-                "start": {"unit": "MiB", "value": current_offset_mib_val},
-                "size": {"unit": "GiB", "value": root_size_gib_val},
-                "mountpoint": "/", "flags": root_flags
-            })
-            home_start_mib_val = current_offset_mib_val + (root_size_gib_val * 1024)
-
-            if (disk_size_bytes / (1024**2)) > (home_start_mib_val + 1024): # Min 1GiB for home
-                partitions.append({
-                    "status": "create", "type": "primary", "fs_type": "ext4",
-                    # Removed sector_size key
-                    "start": {"unit": "MiB", "value": home_start_mib_val},
-                    "size": {"unit": "Percent", "value": 100}, 
-                    "mountpoint": "/home", "flags": []
-                })
-
             self.archinstall_json_config_data["disk_config"] = {
-                "config_type": "default_layout", 
-                "device_modifications": [{
-                    "device": disk_path_str, "wipe": True, "partitions": partitions
-                }]
+                "config_type": "default_layout", # Use archinstall's default partitioning logic
+                "device_path": disk_path_str,    # Specify the target device
+                "wipe": True
             }
-        else: 
-            self.archinstall_json_config_data["disk_config"] = {"config_type": "manual_partitioning"}
-            self.log_output.append("Disk wipe not selected. User responsible for pre-partitioned disk.")
+            self.log_output.append(f"Configured disk_config for default layout on {disk_path_str} (wipe=True).")
+        else:
+            self.archinstall_json_config_data["disk_config"] = {
+                "config_type": "manual_partitioning" # Rely on user's pre-existing setup
+            }
+            self.log_output.append("Configured disk_config for manual partitioning (wipe=False). User is responsible for setup.")
 
         # Profile Configuration
         if profile_name:
             profile_name_lower = profile_name.lower()
             profile_config = {"profile": {"main": profile_name_lower}}
-            # Add greeter based on profile, as per example's pattern if needed by archinstall version
             if profile_name_lower == "kde": profile_config["greeter"] = "sddm"
             elif profile_name_lower == "gnome": profile_config["greeter"] = "gdm"
             self.archinstall_json_config_data["profile_config"] = profile_config
-        
+
         # Package Selection
         final_packages = default_packages_for_nm[:]
         for category, checkbox in self.app_category_checkboxes.items():
             if checkbox.isChecked(): final_packages.extend(APP_CATEGORIES[category])
-        # Ensure base-devel is handled correctly if selected (it's a group)
-        # For JSON, just listing 'base-devel' might work, archinstall handles groups.
         self.archinstall_json_config_data["packages"] = list(set(final_packages))
-        
+
         self.log_output.append("JSON Configuration prepared for Archinstall thread.")
 
         # --- Start Installation Thread ---
@@ -437,18 +411,17 @@ class MaiBloomInstallerApp(QWidget):
         self.installer_thread.start()
 
     # on_installation_finished, run_post_install_script, on_post_install_finished remain the same
-
     def on_installation_finished(self, success, message):
         self.update_log(message)
         if success:
             QMessageBox.information(self, "Installation Complete", "Arch Linux installation finished successfully!")
             if self.post_install_script_path:
                 self.log_output.append("\n--- Proceeding to post-installation script. ---")
-                self.run_post_install_script("/mnt/archinstall") 
+                self.run_post_install_script("/mnt/archinstall")
             else:
                 self.install_button.setEnabled(True); self.log_output.append("No post-install script.")
         else:
-            QMessageBox.critical(self, "Installation Failed", f"Installation failed.\n{message}") 
+            QMessageBox.critical(self, "Installation Failed", f"Installation failed.\n{message}") # Show error message from thread
             self.install_button.setEnabled(True)
 
     def run_post_install_script(self, target_mount_point):
@@ -470,6 +443,7 @@ if __name__ == '__main__':
     if not check_root():
         print("Error: This application must be run as root (or with sudo).")
         sys.exit(1)
+
     app = QApplication(sys.argv)
     installer = MaiBloomInstallerApp()
     installer.show()
