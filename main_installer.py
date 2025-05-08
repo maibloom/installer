@@ -25,7 +25,6 @@ def check_root():
     return os.geteuid() == 0
 
 # --- Archinstall Interaction Thread (JSON + CLI) ---
-# This thread remains the same as the previous JSON version
 class ArchinstallThread(QThread):
     installation_finished = pyqtSignal(bool, str)
     installation_log = pyqtSignal(str)
@@ -44,7 +43,7 @@ class ArchinstallThread(QThread):
                 json.dump(self.config_data, f, indent=2)
 
             self.installation_log.emit(f"Archinstall JSON configuration saved to {self.config_file_path}")
-            # Comment out verbose logging of the full config unless debugging
+            # Avoid logging potentially huge config unless necessary
             # self.installation_log.emit(f"Full JSON configuration:\n{json.dumps(self.config_data, indent=2)}")
             self.installation_log.emit("Starting Arch Linux installation process via archinstall CLI...")
             self.installation_log.emit("This may take a while. Please be patient.")
@@ -65,7 +64,6 @@ class ArchinstallThread(QThread):
             if process.stderr:
                 stderr_output = process.stderr.read()
                 if stderr_output:
-                    # Log the full stderr for debugging
                     self.installation_log.emit(f"Archinstall STDERR:\n{stderr_output}")
                 process.stderr.close()
 
@@ -73,30 +71,27 @@ class ArchinstallThread(QThread):
 
             if ret_code == 0:
                 self.installation_log.emit("Archinstall process completed successfully.")
-                self.installation_finished.emit(True, "Arch Linux installation successful!")
+                self.installation_finished.emit(True, "Arch Linux installation successful (minimal base system)!") # Adjusted message
             else:
                 error_msg = f"Archinstall process failed with error code {ret_code}."
                 traceback_lines = [line for line in stderr_output.strip().split('\n') if line]
                 if traceback_lines:
                      error_msg += f"\nRelevant error output:\n---\n"
-                     error_msg += "\n".join(traceback_lines[-15:]) # Show last 15 lines
+                     error_msg += "\n".join(traceback_lines[-15:])
                      error_msg += "\n---"
-                elif stdout_lines: # Fallback if stderr is empty
+                elif stdout_lines:
                      error_msg += f"\nLast output lines:\n---\n"
                      error_msg += "\n".join(stdout_lines[-10:])
                      error_msg += "\n---"
-
-                self.installation_log.emit(f"Failure details recorded in log.") # Avoid repeating full trace in main log view if already shown once
-                # Provide a slightly shorter message for the popup
+                self.installation_log.emit(f"Failure details recorded in log.")
                 popup_error_msg = f"Archinstall process failed with error code {ret_code}.\nSee log for details."
-                self.installation_finished.emit(False, popup_error_msg) # Emit shorter message for popup
+                self.installation_finished.emit(False, popup_error_msg)
 
         except FileNotFoundError:
             err_msg = "Error: `archinstall` command not found. Is it installed and in your PATH?"
-            self.installation_log.emit(err_msg)
-            self.installation_finished.emit(False, err_msg)
+            self.installation_log.emit(err_msg); self.installation_finished.emit(False, err_msg)
         except Exception as e:
-            self.installation_log.emit(f"An error occurred before or during archinstall CLI execution: {str(e)}\n{traceback.format_exc()}")
+            self.installation_log.emit(f"An error occurred: {str(e)}\n{traceback.format_exc()}")
             self.installation_finished.emit(False, f"An unexpected error occurred: {str(e)}")
         finally:
             if os.path.exists(self.config_file_path):
@@ -104,7 +99,6 @@ class ArchinstallThread(QThread):
                 except OSError as e: self.installation_log.emit(f"Warning: Could not remove temp config file {self.config_file_path}: {e}")
 
 
-# PostInstallThread remains the same
 class PostInstallThread(QThread):
     post_install_finished = pyqtSignal(bool, str)
     post_install_log = pyqtSignal(str)
@@ -156,7 +150,7 @@ class PostInstallThread(QThread):
                 try: os.remove(target_script_path); self.post_install_log.emit(f"Cleaned up: {target_script_path}") # type: ignore
                 except OSError as e: self.post_install_log.emit(f"Warning: Could not remove {target_script_path}: {e}") # type: ignore
 
-# GUI Class remains the same structure
+
 class MaiBloomInstallerApp(QWidget):
     def __init__(self):
         super().__init__()
@@ -164,7 +158,6 @@ class MaiBloomInstallerApp(QWidget):
         self.post_install_script_path = ""
         self.init_ui()
 
-    # init_ui remains the same (with log on right)
     def init_ui(self):
         self.setWindowTitle('Mai Bloom OS Installer')
         self.setGeometry(100, 100, 850, 700)
@@ -188,7 +181,7 @@ class MaiBloomInstallerApp(QWidget):
         disk_layout_vbox.addWidget(QLabel("<small>Ensure correct disk selection. This is irreversible if 'Wipe Disk' is checked.</small>"))
         self.wipe_disk_checkbox = QCheckBox("Wipe selected disk (Uses archinstall's default auto-partitioning)")
         self.wipe_disk_checkbox.setChecked(True)
-        self.wipe_disk_checkbox.setToolTip("Wipes disk and lets archinstall create its default layout (e.g., Boot, Root, Home).\nUncheck to use pre-existing partitions (advanced, requires manual setup).")
+        self.wipe_disk_checkbox.setToolTip("Wipes disk and lets archinstall create its default layout.\nUncheck to use pre-existing partitions (advanced, requires manual setup).")
         disk_layout_vbox.addWidget(self.wipe_disk_checkbox)
         disk_group.setLayout(disk_layout_vbox)
         controls_layout.addWidget(disk_group)
@@ -289,7 +282,6 @@ class MaiBloomInstallerApp(QWidget):
         except json.JSONDecodeError:
             self.log_output.append("Error parsing disk information."); QMessageBox.warning(self, "Disk Scan Error", "Failed to parse disk info.")
 
-
     def select_post_install_script(self):
         options = QFileDialog.Options()
         filePath, _ = QFileDialog.getOpenFileName(self, "Select Post-Installation Bash Script", "", "Bash Scripts (*.sh);;All Files (*)", options=options)
@@ -304,7 +296,7 @@ class MaiBloomInstallerApp(QWidget):
         self.log_output.append(message)
         self.log_output.ensureCursorVisible(); QApplication.processEvents()
 
-    # start_installation_process MODIFIED for MINIMAL JSON config
+    # start_installation_process MODIFIED for MINIMAL JSON config (NO PROFILE)
     def start_installation_process(self):
         hostname = self.hostname_input.text().strip()
         username = self.username_input.text().strip()
@@ -314,7 +306,7 @@ class MaiBloomInstallerApp(QWidget):
         kb_layout = self.keyboard_layout_input.text().strip()
         timezone = self.timezone_input.text().strip()
         selected_disk_index = self.disk_combo.currentIndex()
-        profile_name = self.profile_combo.currentText()
+        profile_name = self.profile_combo.currentText() # Get profile name for warning message
         wipe_disk_checked = self.wipe_disk_checkbox.isChecked()
 
         if selected_disk_index < 0:
@@ -330,50 +322,43 @@ class MaiBloomInstallerApp(QWidget):
         if password != confirm_password:
             QMessageBox.warning(self, "Input Error", "Passwords do not match."); return
 
+        # --- Update Confirmation Message ---
         confirm_msg_detail = f"<b>TARGET DISK: {disk_path_str}</b> ({disk_size_bytes / (1024**3):.2f} GB)\n"
-        confirm_msg_detail += f"Hostname: {hostname}, Profile: {profile_name}\n"
+        confirm_msg_detail += f"Hostname: {hostname}\n"
+        confirm_msg_detail += f"<b>!!! IMPORTANT WORKAROUND !!!</b>\n"
+        confirm_msg_detail += f"Due to a suspected archinstall bug related to profiles, the selected profile ('{profile_name}') "
+        confirm_msg_detail += f"<b>WILL NOT BE INSTALLED</b>.\n"
+        confirm_msg_detail += f"Only a minimal command-line system will be set up.\n"
+        confirm_msg_detail += f"You must install the desktop environment manually after first boot.\n\n"
+
         if wipe_disk_checked:
             confirm_msg_detail += f"<b>ALL DATA ON {disk_path_str} WILL BE ERASED. Archinstall will use its default partitioning scheme.</b>\n"
         else:
             confirm_msg_detail += f"<b>The disk {disk_path_str} will NOT be wiped. Using existing partitions (ADVANCED).</b>\n"
-        confirm_msg_detail += "Are you absolutely sure you want to proceed?"
+        confirm_msg_detail += "Proceed with this MINIMAL (no desktop) installation?"
 
-        reply = QMessageBox.question(self, 'Confirm Installation', confirm_msg_detail, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        reply = QMessageBox.question(self, 'Confirm MINIMAL Installation', confirm_msg_detail, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.No:
-            self.log_output.append("Installation cancelled by user."); return
+            self.log_output.append("Installation cancelled by user."); return # Exit if user cancels
 
         self.install_button.setEnabled(False); self.log_output.clear()
-        self.log_output.append("Preparing MINIMAL JSON configuration for archinstall...")
+        self.log_output.append("Preparing MINIMAL JSON configuration (NO PROFILE) for archinstall...")
 
-        # --- Build the MINIMAL JSON config dictionary ---
+        # --- Build the MINIMAL JSON config dictionary (NO PROFILE) ---
         is_efi = os.path.exists("/sys/firmware/efi")
         sys_lang_base = locale_str.split('.')[0] if '.' in locale_str else locale_str
-        # Encoding often defaults fine, omit for minimal config
-        # sys_enc = locale_str.split('.')[-1] if '.' in locale_str and locale_str.split('.')[-1] else "UTF-8"
 
         minimal_config_data = {
-            # Essential Settings from GUI
             "hostname": hostname,
-            "locale_config": {
-                "sys_lang": sys_lang_base,
-                "kb_layout": kb_layout
-            },
+            "locale_config": { "sys_lang": sys_lang_base, "kb_layout": kb_layout },
             "timezone": timezone,
             "bootloader": "Systemd-boot" if is_efi else "Grub",
             "users": [{"username": username, "password": password, "sudo": True}],
-            "profile_config": {"profile": {"main": profile_name.lower()}} if profile_name else {},
-
-            # Disk Config (Simplified)
-            # Added below based on wipe_disk_checked
-
-            # Minimal Necessary Packages (Network + selected categories)
+            # --- OMITTING profile_config key entirely ---
             "packages": [], # Populated below
-
-            # Necessary Flags/Defaults for Automation
             "silent": True,
-            "ntp": True, # Good default
-            "swap": True, # Good default (swap file)
-            # Omitting audio_config, kernels, mirror_config etc. to let archinstall handle defaults
+            "ntp": True,
+            "swap": True,
         }
 
         # Simplified disk_config generation
@@ -390,16 +375,16 @@ class MaiBloomInstallerApp(QWidget):
             }
             self.log_output.append("Minimal config: using manual partitioning (wipe=False).")
 
-        # Package Selection - Start with base requirement (networkmanager) + add user selections
-        final_packages = ["networkmanager"] # Ensure networking works
+        # Package Selection - Start with base requirements + add user selections
+        final_packages = ["networkmanager", "sudo", "nano"] # Base essentials
         for category, checkbox in self.app_category_checkboxes.items():
             if checkbox.isChecked():
                 final_packages.extend(APP_CATEGORIES[category])
         minimal_config_data["packages"] = list(set(final_packages)) # Add unique packages
 
-        self.archinstall_json_config_data = minimal_config_data # Assign the built minimal config
+        self.archinstall_json_config_data = minimal_config_data
 
-        self.log_output.append("Minimal JSON Configuration prepared for Archinstall thread.")
+        self.log_output.append("Minimal JSON Configuration (NO PROFILE) prepared for Archinstall thread.")
 
         # --- Start Installation Thread ---
         self.installer_thread = ArchinstallThread(self.archinstall_json_config_data)
@@ -407,18 +392,18 @@ class MaiBloomInstallerApp(QWidget):
         self.installer_thread.installation_finished.connect(self.on_installation_finished)
         self.installer_thread.start()
 
-    # on_installation_finished, run_post_install_script, on_post_install_finished remain the same
     def on_installation_finished(self, success, message):
         self.update_log(message)
         if success:
-            QMessageBox.information(self, "Installation Complete", "Arch Linux installation finished successfully!")
+            # Adjusted success message
+            QMessageBox.information(self, "Installation Complete", "Arch Linux MINIMAL base installation finished successfully!\n\nRemember to install a desktop environment manually after booting.")
             if self.post_install_script_path:
                 self.log_output.append("\n--- Proceeding to post-installation script. ---")
                 self.run_post_install_script("/mnt/archinstall")
             else:
                 self.install_button.setEnabled(True); self.log_output.append("No post-install script.")
         else:
-            QMessageBox.critical(self, "Installation Failed", f"Installation failed.\n{message}") # Show error message from thread
+            QMessageBox.critical(self, "Installation Failed", f"Installation failed.\n{message}")
             self.install_button.setEnabled(True)
 
     def run_post_install_script(self, target_mount_point):
@@ -433,14 +418,13 @@ class MaiBloomInstallerApp(QWidget):
         if success: QMessageBox.information(self, "Post-Install Complete", "Post-installation script finished.")
         else: QMessageBox.warning(self, "Post-Install Issue", f"Post-install script issues.\n{message}")
         self.install_button.setEnabled(True)
-        self.log_output.append("Mai Bloom OS setup process finished.")
+        self.log_output.append("Mai Bloom OS setup process finished (minimal system installed).")
 
 
 if __name__ == '__main__':
     if not check_root():
         print("Error: This application must be run as root (or with sudo).")
         sys.exit(1)
-
     app = QApplication(sys.argv)
     installer = MaiBloomInstallerApp()
     installer.show()
