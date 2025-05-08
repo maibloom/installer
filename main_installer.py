@@ -1,396 +1,455 @@
 import sys
 import os
-import subprocess
-import threading
+import shutil
+import tempfile
 import tarfile
 import requests
-import json # For parsing GitHub API response
+import json
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QPushButton,
-                             QTextEdit, QFileDialog, QLabel, QMessageBox, QProgressBar)
-from PyQt5.QtCore import Qt, pyqtSignal, QObject, QTimer
+                             QTextEdit, QLabel, QMessageBox, QProgressBar)
+from PyQt5.QtCore import Qt, pyqtSignal, QObject, QProcess, QTimer
 
 # GitHub repository details
 GH_REPO_OWNER = "calamares"
 GH_REPO_NAME = "calamares"
 GH_API_LATEST_RELEASE_URL = f"https://api.github.com/repos/{GH_REPO_OWNER}/{GH_REPO_NAME}/releases/latest"
 
-class DownloaderSignals(QObject):
-    progress = pyqtSignal(int)
-    finished = pyqtSignal(str) # Emits downloaded file path
-    error = pyqtSignal(str)
-    latest_release_info = pyqtSignal(dict) # Emits {'version': str, 'download_url': str, 'src_dir_name': str}
+# Arch Linux Dependencies for Calamares (Qt5 build)
+CALAMARES_DEPENDENCIES = [
+    "qt5-base", "qt5-svg", "qt5-xmlpatterns",
+    "kconfig5", "kcoreaddons5", "ki18n5", "kiconthemes5", "kio5",
+    "plasma-framework5", "solid5", "polkit-qt5", "kpmcore",
+    "yaml-cpp", "python-yaml", "python-pyqt5", "python-jsonschema", # python-pyqt5 is also for calamares modules
+    "squashfs-tools", "boost", "extra-cmake-modules",
+    "cmake", "make", "ninja", "git", "base-devel" # base-devel for build tools
+]
 
-class GitHubLatestReleaseFetcher(threading.Thread):
-    def __init__(self, signals):
-        super().__init__()
-        self.signals = signals
-
-    def run(self):
-        try:
-            response = requests.get(GH_API_LATEST_RELEASE_URL, timeout=10)
-            response.raise_for_status()
-            release_data = response.json()
-
-            tag_name = release_data.get("tag_name")
-            tarball_url = release_data.get("tarball_url")
-
-            if not tag_name or not tarball_url:
-                self.signals.error.emit("Could not find tag_name or tarball_url in GitHub API response.")
-                return
-
-            # Derive source directory name (e.g., calamares-3.3.14 from v3.3.14)
-            # GitHub usually creates a dir like 'owner-repo-commit_hash' or 'repo-tag' from tarball
-            # The tarball from 'tarball_url' typically extracts to a directory like 'calamares-calamares-<short_hash>'
-            # or 'calamares-calamares-<tag_name_without_v>'
-            # However, the .tar.gz available under "Assets" usually has a cleaner name like 'calamares-3.3.14.tar.gz'
-            # and extracts to 'calamares-3.3.14'.
-            # Let's try to find a source asset first for a cleaner name.
-            assets = release_data.get("assets", [])
-            source_tarball_asset_url = None
-            derived_src_dir_name = f"{GH_REPO_NAME}-{tag_name.lstrip('v')}" # Default assumption
-
-            for asset in assets:
-                if asset.get("name", "").endswith(".tar.gz") and GH_REPO_NAME in asset.get("name", ""):
-                    # Prefer asset like 'calamares-3.3.14.tar.gz'
-                    if tag_name.lstrip('v') in asset.get("name"):
-                        tarball_url = asset.get("browser_download_url")
-                        # src_dir_name can be reliably derived if asset name is like 'calamares-version.tar.gz'
-                        derived_src_dir_name = asset.get("name").replace(".tar.gz", "")
-                        break
-            # If no specific asset found, stick with the general tarball_url and its less predictable dir name,
-            # or refine CALAMARES_SRC_DIR_NAME logic post-extraction.
-            # For now, the derived_src_dir_name will be updated in on_download_finished after actual extraction.
-
-            release_info = {
-                "version": tag_name,
-                "download_url": tarball_url,
-                "default_src_dir_pattern": f"{GH_REPO_NAME}-{tag_name.lstrip('v')}" # A pattern to look for
-            }
-            self.signals.latest_release_info.emit(release_info)
-
-        except requests.exceptions.Timeout:
-            self.signals.error.emit("Fetching latest release timed out. Check your internet connection.")
-        except requests.exceptions.RequestException as e:
-            self.signals.error.emit(f"GitHub API request failed: {e}")
-        except (KeyError, TypeError, json.JSONDecodeError) as e:
-            self.signals.error.emit(f"Failed to parse GitHub API response: {e}")
+class AutomatorSignals(QObject):
+    progress_update = pyqtSignal(str)
+    process_finished = pyqtSignal(str)
+    process_error = pyqtSignal(str)
+    all_done = pyqtSignal(str)
+    critical_error = pyqtSignal(str)
+    update_progress_bar = pyqtSignal(int)
 
 
-class Downloader(threading.Thread):
-    def __init__(self, url, save_path, signals):
-        super().__init__()
-        self.url = url
-        self.save_path = save_path
-        self.signals = signals
-
-    def run(self):
-        try:
-            response = requests.get(self.url, stream=True, timeout=30) # Added timeout
-            response.raise_for_status()
-            total_size = int(response.headers.get('content-length', 0))
-            downloaded_size = 0
-
-            with open(self.save_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded_size += len(chunk)
-                        if total_size > 0:
-                            progress_percentage = int((downloaded_size / total_size) * 100)
-                            self.signals.progress.emit(progress_percentage)
-            self.signals.progress.emit(100)
-            self.signals.finished.emit(self.save_path)
-        except requests.exceptions.Timeout:
-            self.signals.error.emit("Download timed out. Check your internet connection.")
-        except requests.exceptions.RequestException as e:
-            self.signals.error.emit(f"Download failed: {e}")
-        except Exception as e: # Catch any other exception during download/write
-            self.signals.error.emit(f"An error occurred during download: {e}")
-
-class CalamaresDownloaderApp(QWidget):
+class CalamaresAutomatorApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"Calamares Latest Release Downloader & Helper (Arch Linux)")
-        self.setGeometry(100, 100, 800, 750)
+        self.setWindowTitle(f"Fully Automated Calamares Installer (Arch Linux)")
+        self.setGeometry(100, 100, 900, 700)
 
         self.calamares_version = "Fetching..."
         self.calamares_download_url = ""
-        self.calamares_src_dir_pattern = "" # Pattern for the extracted directory
+        self.calamares_src_dir_pattern = ""
+        self.archive_filename = ""
+        self.temp_dir_obj = None # For TemporaryDirectory object
+        self.temp_dir_path = ""
+        self.extracted_calamares_path = ""
+        self.build_path = ""
+
+        self.signals = AutomatorSignals()
+        self.signals.progress_update.connect(self.log_message)
+        self.signals.process_finished.connect(self.log_message)
+        self.signals.process_error.connect(self.handle_process_error)
+        self.signals.all_done.connect(self.handle_all_done)
+        self.signals.critical_error.connect(self.handle_critical_error)
+        self.signals.update_progress_bar.connect(self.set_progress_bar)
+
+
+        self.qprocess = None
+        self.current_stage_index = 0
+        self.stages = [] # Will be populated after fetching release info
 
         self.init_ui()
+        self._ensure_sudo() # Check if running with sudo
 
-        self.download_thread = None
-        self.fetch_thread = None
+        # Start fetching release info automatically
+        QTimer.singleShot(100, self.start_step_1_fetch_release_info)
 
-        self.signals = DownloaderSignals()
-        self.signals.progress.connect(self.update_progress)
-        self.signals.finished.connect(self.on_download_finished)
-        self.signals.error.connect(self.on_download_or_fetch_error)
-        self.signals.latest_release_info.connect(self.update_release_info)
 
-        self.download_path = ""
-        self.extracted_path = ""
-
-        self.fetch_latest_release()
+    def _ensure_sudo(self):
+        if os.geteuid() != 0:
+            self.log_message("CRITICAL: This script must be run with sudo privileges.")
+            self.log_message("Example: sudo python your_script_name.py")
+            QMessageBox.critical(self, "Sudo Required",
+                                 "This script requires sudo privileges to automate package installation and run Calamares.\n"
+                                 "Please run it again using 'sudo python your_script_name.py'.")
+            QTimer.singleShot(100, self.close) # Close app after message
+            return False
+        return True
 
     def init_ui(self):
         layout = QVBoxLayout()
 
-        self.status_label = QLabel(f"Fetching latest Calamares release info...")
+        self.status_label = QLabel("Status: Initializing...")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
-        self.info_label = QLabel(
-            "This tool will download the latest Calamares source code and provide "
-            "instructions to build it on Arch Linux.\n"
-            "Ensure you have an internet connection and sudo privileges for installing dependencies."
-        )
-        self.info_label.setWordWrap(True)
-        layout.addWidget(self.info_label)
-
-        self.btn_download = QPushButton(f"Download Latest Calamares Source")
-        self.btn_download.clicked.connect(self.start_download)
-        self.btn_download.setEnabled(False) # Disabled until release info is fetched
-        layout.addWidget(self.btn_download)
-
         self.progress_bar = QProgressBar(self)
-        self.progress_bar.setValue(0)
+        self.progress_bar.setRange(0, 100) # Will represent stages or download %
         layout.addWidget(self.progress_bar)
 
-        self.instructions_label = QLabel("Build and Run Instructions (run these in your terminal):")
-        layout.addWidget(self.instructions_label)
+        self.log_output = QTextEdit()
+        self.log_output.setReadOnly(True)
+        self.log_output.setFontFamily("Monospace")
+        self.log_output.setLineWrapMode(QTextEdit.WidgetWidth)
+        layout.addWidget(self.log_output)
 
-        self.instructions_text = QTextEdit()
-        self.instructions_text.setReadOnly(True)
-        self.instructions_text.setText("Please wait, fetching latest release information...")
-        layout.addWidget(self.instructions_text)
+        self.btn_start_automation = QPushButton("Start Full Automation (NOT RECOMMENDED - READ WARNINGS)")
+        self.btn_start_automation.setStyleSheet("background-color: #ffc107; color: black;") # Warning color
+        self.btn_start_automation.setEnabled(False) # Will be enabled after release info
+        self.btn_start_automation.clicked.connect(self.confirm_and_start_automation_stages)
+        layout.addWidget(self.btn_start_automation)
 
         self.setLayout(layout)
 
-    def fetch_latest_release(self):
-        self.fetch_thread = GitHubLatestReleaseFetcher(self.signals)
-        self.fetch_thread.start()
+    def log_message(self, message):
+        self.log_output.append(message)
+        self.log_output.ensureCursorVisible() # Scroll to bottom
+        QApplication.processEvents() # Keep UI responsive
 
-    def update_release_info(self, release_info):
-        self.calamares_version = release_info["version"]
-        self.calamares_download_url = release_info["download_url"]
-        self.calamares_src_dir_pattern = release_info["default_src_dir_pattern"]
+    def set_status(self, message):
+        self.status_label.setText(f"Status: {message}")
+        self.log_message(f"--- STATUS: {message} ---")
 
-        self.status_label.setText(f"Latest Calamares Release: {self.calamares_version}")
-        self.setWindowTitle(f"Calamares {self.calamares_version} Downloader & Helper (Arch Linux)")
-        self.btn_download.setText(f"Download Calamares {self.calamares_version} Source")
-        self.btn_download.setEnabled(True)
-        self.instructions_text.setText(self.get_instructions()) # Update instructions with version
-        QMessageBox.information(self, "Release Info Updated", f"Ready to download Calamares {self.calamares_version}.")
-
-
-    def get_instructions(self, extracted_dir_name_actual=None):
-        # Use actual extracted directory name if known, otherwise use pattern
-        calamares_dir_name_for_display = extracted_dir_name_actual if extracted_dir_name_actual else self.calamares_src_dir_pattern
-        download_filename = os.path.basename(self.calamares_download_url) if self.calamares_download_url else f"calamares-{self.calamares_version}.tar.gz"
-
-
-        return f"""
-        Welcome to Calamares {self.calamares_version} build helper for Arch Linux!
-
-        The source code archive will be downloaded. Follow these steps in your terminal:
-
-        Step 1: Ensure PyQt5 is installed
-        ---------------------------------
-        If you haven't installed PyQt5 yet (needed for this GUI tool):
-        sudo pacman -S --needed python-pyqt5
-
-        Step 2: Install Calamares Build Dependencies
-        -------------------------------------------
-        These are needed to compile Calamares. Open a terminal and run:
-        sudo pacman -S --needed qt5-base qt5-svg qt5-xmlpatterns \\
-            kconfig5 kcoreaddons5 ki18n5 kiconthemes5 kio5 plasma-framework5 solid5 \\
-            polkit-qt5 kpmcore yaml-cpp python-yaml python-jsonschema squashfs-tools \\
-            boost extra-cmake-modules cmake make ninja git
-
-        (Note: This list is comprehensive for a Qt5 build of Calamares. `python-pyqt5` is
-         also a Calamares dependency if its Python modules use PyQt bindings.)
-
-        Step 3: Extract Calamares (if not automatically extracted)
-        -----------------------------------------------------------
-        The downloaded file will be '{download_filename}'.
-        If extraction by this tool fails, you can do it manually:
-        tar -xzf {download_filename}
-
-        Step 4: Build Calamares
-        ----------------------
-        Navigate to the extracted Calamares source directory.
-        The directory is typically named something like '{self.calamares_src_dir_pattern}' or '{GH_REPO_NAME}-{GH_REPO_NAME}-<some_hash>'.
-        This tool will attempt to confirm the exact name after extraction.
-        If this tool extracted it, the path will be confirmed. For now, assume:
-        cd "{self.extracted_path if self.extracted_path else 'PATH_TO_EXTRACTED_FOLDER/' + calamares_dir_name_for_display}"
-        
-        mkdir build
-        cd build
-
-        Run CMake to configure the build. For a Qt5 build with KF5 dependencies installed:
-        cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
-
-        (Optional: To disable the webview module, add: -DWITH_WEBVIEWMODULE=OFF
-         Check other options with `cmake -LH ..` in the build directory.)
-
-        After CMake finishes successfully, compile Calamares:
-        make -j$(nproc)  # Uses all available CPU cores
-
-        Step 5: Install Calamares (Optional)
-        ------------------------------------
-        sudo make install
-
-        Step 6: Run Calamares
-        --------------------
-        If installed:
-        sudo calamares
-
-        If running from the build directory (without installing):
-        sudo ./bin/calamares  (Ensure you are in the 'build' directory)
-
-        IMPORTANT NOTES:
-        * Running Calamares requires root privileges (sudo).
-        * This builds the generic Calamares framework. For a custom Arch Linux installer,
-          you'll need to configure Calamares modules and branding separately.
-        * If CMake has issues finding Qt5/KF5, ensure all dependencies from Step 2 are installed.
-          Clean the build directory (rm -rf *) and retry cmake.
-        """
-
-    def start_download(self):
-        if not self.calamares_download_url:
-            QMessageBox.warning(self, "Error", "Download URL not available. Cannot start download.")
-            return
-
-        save_dir = QFileDialog.getExistingDirectory(self, f"Select Directory to Save Calamares {self.calamares_version} Source")
-        if not save_dir:
-            QMessageBox.information(self, "Download Cancelled", "Download directory not selected.")
-            return
-
-        # Use the actual filename from the URL or a derived one
-        archive_filename = os.path.basename(self.calamares_download_url)
-        if not archive_filename or not archive_filename.endswith((".gz", ".zip", ".xz")): # Basic check
-            archive_filename = f"calamares-{self.calamares_version}.tar.gz"
-
-
-        self.download_path = os.path.join(save_dir, archive_filename)
-        self.btn_download.setEnabled(False)
-        self.progress_bar.setValue(0)
-        self.status_label.setText(f"Downloading Calamares {self.calamares_version} to {self.download_path}...")
-
-        self.download_thread = Downloader(self.calamares_download_url, self.download_path, self.signals)
-        self.download_thread.start()
-
-    def update_progress(self, value):
+    def set_progress_bar(self, value):
         self.progress_bar.setValue(value)
 
-    def on_download_or_fetch_error(self, error_message):
-        QMessageBox.critical(self, "Error", error_message)
-        self.status_label.setText(f"Error: {error_message}")
-        # Re-enable download button only if version info was fetched successfully
-        if self.calamares_version != "Fetching...":
-            self.btn_download.setEnabled(True)
-        else: # If fetch failed, offer to retry fetching
-            self.btn_download.setText("Retry Fetching Release Info")
-            self.btn_download.setEnabled(True)
-            # Disconnect old slot if any, and connect to fetch_latest_release
-            try:
-                self.btn_download.clicked.disconnect()
-            except TypeError:
-                pass # No slot was connected or already disconnected
-            self.btn_download.clicked.connect(self.fetch_latest_release)
+    def handle_process_error(self, error_message):
+        self.log_message(f"ERROR: {error_message}")
+        self.set_status(f"Error occurred: {error_message.splitlines()[0] if error_message else 'Unknown'}")
+        self.btn_start_automation.setEnabled(True) # Allow retry perhaps, or just indicate failure
+        self.btn_start_automation.setText("Automation Failed. Retry?")
+        self.btn_start_automation.setStyleSheet("background-color: #dc3545; color: white;") # Error color
+        QMessageBox.critical(self, "Automation Error", f"An error occurred:\n{error_message}")
 
-        self.progress_bar.setValue(0)
+    def handle_critical_error(self, error_message):
+        self.log_message(f"CRITICAL ERROR: {error_message}")
+        self.set_status(f"Critical Error: {error_message}")
+        QMessageBox.critical(self, "Critical Error", error_message)
+        self.btn_start_automation.setEnabled(False)
+        self.btn_start_automation.setStyleSheet("background-color: #dc3545; color: white;")
 
-    def on_download_finished(self, downloaded_file_path):
-        self.status_label.setText(f"Calamares {self.calamares_version} downloaded: {downloaded_file_path}")
-        QMessageBox.information(self, "Download Complete",
-                                f"Calamares source downloaded successfully:\n{downloaded_file_path}")
+    def handle_all_done(self, message):
+        self.log_message(message)
+        self.set_status(message)
         self.progress_bar.setValue(100)
+        self.btn_start_automation.setText("Automation Complete. Run Calamares Again?")
+        self.btn_start_automation.setStyleSheet("background-color: #28a745; color: white;") # Success color
+        # For "Run Calamares Again", we'd need to ensure it points to the last stage (run calamares)
+        # and that paths are still valid. Simpler for now is just to indicate completion.
+        self.btn_start_automation.setEnabled(True) # Or False if truly one-shot.
+        QMessageBox.information(self, "Automation Complete", message)
 
-        extract_to_dir = os.path.dirname(downloaded_file_path)
-        self.status_label.setText(f"Extracting {downloaded_file_path}...")
-        QApplication.processEvents()
+
+    def confirm_and_start_automation_stages(self):
+        reply = QMessageBox.warning(self, "Confirm Full Automation",
+                                    "This will automatically:\n"
+                                    "1. Download Calamares.\n"
+                                    "2. Install system dependencies using 'sudo pacman' (NON-INTERACTIVE!).\n"
+                                    "3. Compile Calamares.\n"
+                                    "4. Run Calamares with 'sudo'.\n\n"
+                                    "This process is risky and can affect your system. "
+                                    "Ensure you understand the implications and have backed up important data.\n\n"
+                                    "Do you want to proceed?",
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self.log_message("User confirmed automation. Starting...")
+            self.btn_start_automation.setEnabled(False)
+            self.btn_start_automation.setText("Automation in Progress...")
+            self.btn_start_automation.setStyleSheet("") # Reset color
+            self.progress_bar.setValue(0)
+            self.current_stage_index = 0 # Start from the first real stage (dependency install)
+            # Assuming step 1 (fetch) is done, stages would start from dependency installation.
+            # Let's repopulate stages here just to be sure it uses the latest fetched info.
+            self.stages = self._get_automation_stages()
+            if self.stages:
+                self.run_next_stage()
+            else:
+                self.handle_critical_error("Failed to define automation stages. Release info might be missing.")
+        else:
+            self.log_message("Automation cancelled by user.")
+
+    def _get_automation_stages(self):
+        if not self.calamares_download_url or not self.temp_dir_path:
+             self.log_message("ERROR: Cannot define automation stages. Release info or temp dir not ready.")
+             return []
+        return [
+            {"name": "Install Dependencies", "function": self.run_step_2_install_dependencies, "progress": 15},
+            {"name": "Download Calamares", "function": self.run_step_3_download_calamares, "progress": 30},
+            {"name": "Extract Calamares", "function": self.run_step_4_extract_calamares, "progress": 45},
+            {"name": "Configure Calamares (CMake)", "function": self.run_step_5_cmake_calamares, "progress": 60},
+            {"name": "Compile Calamares (Make)", "function": self.run_step_6_make_calamares, "progress": 85},
+            {"name": "Run Calamares", "function": self.run_step_7_run_calamares, "progress": 100},
+        ]
+
+    def run_next_stage(self):
+        if self.current_stage_index < len(self.stages):
+            stage = self.stages[self.current_stage_index]
+            self.set_status(f"Executing: {stage['name']}")
+            self.set_progress_bar(stage['progress'] - 5 if stage['progress'] > 5 else 0) # Show progress before stage
+            # Use QTimer to allow UI to update before starting potentially blocking task
+            QTimer.singleShot(50, stage["function"])
+        else:
+            self.signals.all_done.emit("All automation stages completed successfully.")
+
+    def stage_completed_successfully(self):
+        stage = self.stages[self.current_stage_index]
+        self.set_progress_bar(stage['progress'])
+        self.current_stage_index += 1
+        self.run_next_stage()
+
+
+    # --- Automation Stages ---
+
+    def start_step_1_fetch_release_info(self):
+        self.set_status("Fetching latest Calamares release information...")
+        try:
+            response = requests.get(GH_API_LATEST_RELEASE_URL, timeout=15)
+            response.raise_for_status()
+            release_data = response.json()
+            self.calamares_version = release_data.get("tag_name", "N/A")
+            assets = release_data.get("assets", [])
+            
+            # Prefer official tar.gz from assets for cleaner extracted dir name
+            source_tarball_asset_url = None
+            for asset in assets:
+                if asset.get("name", "").endswith(".tar.gz") and GH_REPO_NAME in asset.get("name", ""):
+                    if self.calamares_version.lstrip('v') in asset.get("name"):
+                        source_tarball_asset_url = asset.get("browser_download_url")
+                        self.archive_filename = asset.get("name")
+                        # Expected dir name from asset like 'calamares-3.3.14.tar.gz' -> 'calamares-3.3.14'
+                        self.calamares_src_dir_pattern = self.archive_filename.replace(".tar.gz", "")
+                        break
+            
+            if not source_tarball_asset_url: # Fallback to main tarball_url
+                self.calamares_download_url = release_data.get("tarball_url")
+                self.archive_filename = f"{GH_REPO_NAME}-{self.calamares_version}.tar.gz"
+                # Dir name from GitHub's general tarball_url is less predictable, often owner-repo-hash
+                # We'll determine it after extraction. For now, use a placeholder.
+                self.calamares_src_dir_pattern = f"{GH_REPO_NAME}-{self.calamares_version.lstrip('v')}-extracted"
+            else:
+                self.calamares_download_url = source_tarball_asset_url
+
+            if not self.calamares_download_url:
+                raise ValueError("Could not determine download URL from GitHub API response.")
+
+            self.setWindowTitle(f"Automated Calamares {self.calamares_version} Installer")
+            self.log_message(f"Latest Calamares version: {self.calamares_version}")
+            self.log_message(f"Download URL: {self.calamares_download_url}")
+            self.log_message(f"Archive will be named: {self.archive_filename}")
+
+            # Create temporary directory
+            self.temp_dir_obj = tempfile.TemporaryDirectory(prefix="calamares_auto_")
+            self.temp_dir_path = self.temp_dir_obj.name
+            self.log_message(f"Using temporary directory: {self.temp_dir_path}")
+
+            self.set_status(f"Ready to download Calamares {self.calamares_version}. Click 'Start Automation'.")
+            self.btn_start_automation.setEnabled(True)
+            self.set_progress_bar(5) # Small progress for fetching info
+
+        except requests.exceptions.Timeout:
+            self.signals.critical_error.emit("Fetching latest release timed out. Check internet and GitHub API status.")
+        except requests.exceptions.RequestException as e:
+            self.signals.critical_error.emit(f"GitHub API request failed: {e}")
+        except (ValueError, KeyError, json.JSONDecodeError) as e:
+            self.signals.critical_error.emit(f"Failed to parse GitHub API response or data missing: {e}")
+
+
+    def run_step_2_install_dependencies(self):
+        self.log_message("Attempting to install dependencies using pacman...")
+        self.log_message("This requires sudo and will use --noconfirm.")
+        command = ["pacman", "-S", "--noconfirm", "--needed"] + CALAMARES_DEPENDENCIES
+        self.run_qprocess_command(command, "Dependency installation")
+
+    def run_step_3_download_calamares(self):
+        self.log_message(f"Downloading Calamares {self.calamares_version}...")
+        self.set_progress_bar(self.stages[self.current_stage_index]['progress'] - 15) # Intermediate progress
+
+        download_target_path = os.path.join(self.temp_dir_path, self.archive_filename)
 
         try:
-            with tarfile.open(downloaded_file_path, "r:*") as tar: # r:* to auto-detect compression
-                # Get the name of the top-level directory in the tarball
-                # This is more reliable than guessing based on version string
+            response = requests.get(self.calamares_download_url, stream=True, timeout=60)
+            response.raise_for_status()
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded_size = 0
+            
+            with open(download_target_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192 * 4): # Larger chunk
+                    if chunk:
+                        f.write(chunk)
+                        downloaded_size += len(chunk)
+                        if total_size > 0:
+                            progress = int((downloaded_size / total_size) * 15) # Scale to 15% for this stage part
+                            self.set_progress_bar(self.stages[self.current_stage_index]['progress'] - 15 + progress)
+            
+            self.log_message(f"Download complete: {download_target_path}")
+            self.stage_completed_successfully()
+
+        except requests.exceptions.Timeout:
+            self.signals.process_error.emit(f"Download timed out for {self.calamares_download_url}.")
+        except requests.exceptions.RequestException as e:
+            self.signals.process_error.emit(f"Download failed: {e}")
+        except Exception as e:
+            self.signals.process_error.emit(f"An unexpected error occurred during download: {e}")
+
+    def run_step_4_extract_calamares(self):
+        self.log_message("Extracting Calamares source...")
+        archive_path = os.path.join(self.temp_dir_path, self.archive_filename)
+        try:
+            with tarfile.open(archive_path, "r:*") as tar:
+                # Determine the top-level directory after extraction
                 members = tar.getmembers()
                 if not members:
-                    raise tarfile.TarError("Tar archive is empty.")
+                    raise tarfile.TarError("Archive is empty.")
                 
-                # Find the common top-level directory
-                # GitHub tarballs usually have a single top-level directory
-                # e.g. calamares-calamares-aabbcc12 or calamares-3.3.14
-                top_level_dirs = set()
-                for member in members:
-                    if '/' in member.name:
-                        top_level_dirs.add(member.name.split('/', 1)[0])
-                    elif member.isdir(): # A directory at the root level
-                         top_level_dirs.add(member.name)
+                # Common pattern: single top-level directory
+                # e.g., calamares-3.3.14/ or calamares-calamares-gitcommitsha/
+                first_member_parts = members[0].name.split('/', 1)
+                extracted_folder_name = first_member_parts[0]
                 
-                if len(top_level_dirs) == 1:
-                    actual_extracted_dir_name = list(top_level_dirs)[0]
-                elif self.calamares_src_dir_pattern and os.path.exists(os.path.join(extract_to_dir, self.calamares_src_dir_pattern)):
-                     actual_extracted_dir_name = self.calamares_src_dir_pattern
-                elif members[0].name.split('/')[0]: # Fallback to first member's root
-                     actual_extracted_dir_name = members[0].name.split('/')[0]
-                else: # If still unsure, use a generic name and warn user
-                    actual_extracted_dir_name = f"{GH_REPO_NAME}-extracted"
-                    QMessageBox.warning(self, "Extraction Info",
-                                        f"Could not reliably determine the exact top-level directory name from the archive. "
-                                        f"It might be something like '{members[0].name.split('/')[0]}'. "
-                                        f"Please check the extraction folder: {extract_to_dir}")
+                tar.extractall(path=self.temp_dir_path)
+                self.extracted_calamares_path = os.path.join(self.temp_dir_path, extracted_folder_name)
+
+                if not os.path.isdir(self.extracted_calamares_path):
+                    # Fallback if pattern was complex, try to find a dir starting with "calamares-"
+                    found_dir = False
+                    for item in os.listdir(self.temp_dir_path):
+                        if item.startswith(GH_REPO_NAME + "-") and \
+                           os.path.isdir(os.path.join(self.temp_dir_path, item)):
+                            self.extracted_calamares_path = os.path.join(self.temp_dir_path, item)
+                            extracted_folder_name = item
+                            found_dir = True
+                            break
+                    if not found_dir:
+                        raise NotADirectoryError(f"Could not reliably find Calamares source directory after extraction in {self.temp_dir_path}")
+
+            self.log_message(f"Successfully extracted to: {self.extracted_calamares_path}")
+            self.build_path = os.path.join(self.extracted_calamares_path, "build")
+            os.makedirs(self.build_path, exist_ok=True)
+            self.log_message(f"Build directory created: {self.build_path}")
+            self.stage_completed_successfully()
+        except (tarfile.TarError, NotADirectoryError, FileNotFoundError, Exception) as e:
+            self.signals.process_error.emit(f"Extraction failed: {e}")
 
 
-                tar.extractall(path=extract_to_dir)
-                self.extracted_path = os.path.join(extract_to_dir, actual_extracted_dir_name)
+    def run_step_5_cmake_calamares(self):
+        self.log_message("Configuring Calamares with CMake...")
+        if not self.build_path or not os.path.isdir(self.build_path):
+             self.signals.process_error.emit(f"Build path '{self.build_path}' is not valid for CMake.")
+             return
+        # Calamares might pick Qt6 if KF6/Qt6 dev files are present.
+        # To encourage Qt5, ensure KF5/Qt5 dev packages are primary.
+        # Forcing with CMAKE_PREFIX_PATH can be an option if needed, but good deps should suffice.
+        # Adding -DQT_VERSION_MAJOR=5 if such an option exists in Calamares CMake could also work.
+        # Generally, Calamares tries to be smart or one can use options like -DBUILD_WITH_QT6=OFF
+        command = ["cmake", "-S", self.extracted_calamares_path, "-B", self.build_path,
+                   "-DCMAKE_BUILD_TYPE=Release",
+                   "-DCMAKE_INSTALL_PREFIX=/usr", # Standard prefix, though we run from build dir
+                   "-Dವೆಬ್ವಿವೀಕ್ಷಣೆ=ನಿಷ್ಕ್ರಿಯಗೊಳಿಸಲಾಗಿದೆ"] # An example, check Calamares for actual -DWITH_WEBVIEWMODULE=OFF etc.
+                   # Or better: -DWITH_PYTHONQT=ON (if Calamares uses this for PyQt modules)
+        self.run_qprocess_command(command, "CMake configuration")
 
-            if os.path.exists(self.extracted_path) and os.path.isdir(self.extracted_path):
-                QMessageBox.information(self, "Extraction Complete",
-                                        f"Successfully extracted to:\n{self.extracted_path}")
-                self.instructions_text.setText(self.get_instructions(extracted_dir_name_actual=actual_extracted_dir_name))
-                self.status_label.setText(
-                    f"Calamares {self.calamares_version} extracted to {self.extracted_path}."
-                )
-            else:
-                # This case should ideally be caught by the logic above, but as a failsafe:
-                self.extracted_path = "" # Reset if not found
-                raise FileNotFoundError(f"Expected extracted directory '{actual_extracted_dir_name}' not found in {extract_to_dir}. "
-                                        "The tarball might have an unexpected structure. Please check the directory manually.")
+    def run_step_6_make_calamares(self):
+        self.log_message("Compiling Calamares with make...")
+        if not self.build_path or not os.path.isdir(self.build_path):
+             self.signals.process_error.emit(f"Build path '{self.build_path}' is not valid for Make.")
+             return
+        num_cores = os.cpu_count() or 2 # Default to 2 if cpu_count fails
+        command = ["make", f"-j{num_cores}"]
+        self.run_qprocess_command(command, "Compilation (make)", working_directory=self.build_path)
 
-        except tarfile.TarError as e:
-            QMessageBox.critical(self, "Extraction Error", f"Failed to extract tarball: {e}")
-            self.instructions_text.setText(self.get_instructions())
-        except FileNotFoundError as e:
-            QMessageBox.critical(self, "Extraction Error", str(e))
-            self.instructions_text.setText(self.get_instructions())
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"An unexpected error occurred during extraction: {e}")
-            self.instructions_text.setText(self.get_instructions())
-        finally:
-            self.btn_download.setEnabled(True)
-            # Reconnect the download button to start_download if it was changed for retrying fetch
+    def run_step_7_run_calamares(self):
+        self.log_message("Attempting to run Calamares...")
+        calamares_executable = os.path.join(self.build_path, "bin", "calamares")
+        if not os.path.exists(calamares_executable):
+            self.signals.process_error.emit(f"Calamares executable not found at {calamares_executable}")
+            return
+        
+        self.log_message(f"Executing: {calamares_executable} (requires sudo, script already has it)")
+        self.log_message("--- CALAMARES OUTPUT WILL APPEAR BELOW ---")
+        self.log_message("--- CLOSING CALAMARES WILL PROCEED/END SCRIPT ---")
+        # Running Calamares directly, it will take over the terminal if it needs one,
+        # or open its GUI.
+        self.run_qprocess_command([calamares_executable], "Running Calamares")
+
+
+    def run_qprocess_command(self, command_list, process_name, working_directory=None):
+        if self.qprocess and self.qprocess.state() == QProcess.Running:
+            self.signals.process_error.emit(f"Another process ({process_name}) is already running.")
+            return
+
+        self.qprocess = QProcess(self)
+        if working_directory:
+            self.qprocess.setWorkingDirectory(working_directory)
+
+        self.qprocess.readyReadStandardOutput.connect(self.handle_stdout)
+        self.qprocess.readyReadStandardError.connect(self.handle_stderr)
+        # Using finished signal that provides exitCode and exitStatus
+        self.qprocess.finished.connect(lambda exit_code, exit_status: self.handle_qprocess_finished(exit_code, exit_status, process_name))
+
+        self.log_message(f"Executing {'in '+working_directory if working_directory else ''}: {' '.join(command_list)}")
+        self.qprocess.start(command_list[0], command_list[1:])
+
+        if not self.qprocess.waitForStarted(5000): # Wait 5s for process to start
+            self.signals.process_error.emit(f"Failed to start process: {process_name} - {' '.join(command_list)}")
+
+
+    def handle_stdout(self):
+        data = self.qprocess.readAllStandardOutput().data().decode().strip()
+        if data: self.log_message(data)
+
+    def handle_stderr(self):
+        data = self.qprocess.readAllStandardError().data().decode().strip()
+        if data: self.log_message(f"STDERR: {data}")
+
+
+    def handle_qprocess_finished(self, exit_code, exit_status, process_name):
+        self.log_message(f"Process '{process_name}' finished.")
+        self.log_message(f"Exit Code: {exit_code}, Exit Status: {exit_status}")
+
+        if exit_code == 0 and exit_status == QProcess.NormalExit:
+            self.signals.process_finished.emit(f"{process_name} completed successfully.")
+            self.stage_completed_successfully()
+        else:
+            error_output = self.qprocess.readAllStandardError().data().decode().strip()
+            stdout_output = self.qprocess.readAllStandardOutput().data().decode().strip()
+            detailed_error = f"{process_name} failed.\nExit Code: {exit_code}\nExit Status: {exit_status}"
+            if stdout_output: detailed_error += f"\nSTDOUT:\n{stdout_output}"
+            if error_output: detailed_error += f"\nSTDERR:\n{error_output}"
+            self.signals.process_error.emit(detailed_error)
+        self.qprocess = None # Clear the process
+
+    def closeEvent(self, event):
+        # Clean up the temporary directory when the application closes
+        if self.temp_dir_obj:
             try:
-                self.btn_download.clicked.disconnect()
-            except TypeError:
-                pass
-            self.btn_download.clicked.connect(self.start_download)
-            self.btn_download.setText(f"Download Calamares {self.calamares_version} Source")
+                self.log_message(f"Cleaning up temporary directory: {self.temp_dir_path}")
+                self.temp_dir_obj.cleanup()
+                self.log_message("Temporary directory cleaned up.")
+            except Exception as e:
+                self.log_message(f"Warning: Could not cleanup temporary directory {self.temp_dir_path}: {e}")
+        super().closeEvent(event)
 
 
 if __name__ == '__main__':
-    try:
-        from PyQt5 import QtWidgets
-    except ImportError:
-        print("CRITICAL ERROR: PyQt5 is not installed.")
-        print("This GUI application requires PyQt5 to run.")
-        print("Please install it on your Arch Linux system by running:")
-        print("sudo pacman -S python-pyqt5")
+    if os.geteuid() != 0:
+        print("CRITICAL: This script must be run with sudo privileges for full automation.")
+        print("Example: sudo python your_script_name.py")
+        # Simple QMessageBox if PyQt5 is available, otherwise just exit.
+        try:
+            dummy_app_for_msgbox = QApplication.instance() # Check if already exists
+            if not dummy_app_for_msgbox:
+                dummy_app_for_msgbox = QApplication(sys.argv)
+            QMessageBox.critical(None, "Sudo Required",
+                                 "This script requires sudo privileges to automate package installation and run Calamares.\n"
+                                 "Please run it again using 'sudo python your_script_name.py'.")
+        except Exception: # In case PyQt5 is not even installed yet
+            pass
         sys.exit(1)
 
     app = QApplication(sys.argv)
-    ex = CalamaresDownloaderApp()
+    ex = CalamaresAutomatorApp()
     ex.show()
     sys.exit(app.exec_())
