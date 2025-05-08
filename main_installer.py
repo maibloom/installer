@@ -37,6 +37,8 @@ class ArchinstallThread(QThread):
     def run(self):
         try:
             self.installation_log.emit("Preparing archinstall JSON configuration...")
+            # Ensure silent is set for non-interactive run
+            self.config_data['silent'] = True 
             with open(self.config_file_path, 'w') as f:
                 json.dump(self.config_data, f, indent=2)
 
@@ -46,7 +48,6 @@ class ArchinstallThread(QThread):
             self.installation_log.emit("This may take a while. Please be patient.")
 
             cmd = ["archinstall", "--config", self.config_file_path]
-            # Assuming "silent": true is in self.config_data
 
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, universal_newlines=True)
 
@@ -68,7 +69,7 @@ class ArchinstallThread(QThread):
                 self.installation_log.emit("Archinstall process completed successfully.")
                 self.installation_finished.emit(True, "Arch Linux installation successful!")
             else:
-                error_msg = f"Archinstall process failed with error code {ret_code}.\n{stderr_output}" # stderr_output will include the traceback
+                error_msg = f"Archinstall process failed with error code {ret_code}.\n{stderr_output}"
                 self.installation_log.emit(error_msg)
                 self.installation_finished.emit(False, error_msg)
 
@@ -84,6 +85,7 @@ class ArchinstallThread(QThread):
                 try: os.remove(self.config_file_path)
                 except OSError as e: self.installation_log.emit(f"Warning: Could not remove temp config file {self.config_file_path}: {e}")
 
+# PostInstallThread remains the same
 class PostInstallThread(QThread):
     post_install_finished = pyqtSignal(bool, str)
     post_install_log = pyqtSignal(str)
@@ -135,6 +137,7 @@ class PostInstallThread(QThread):
                 try: os.remove(target_script_path); self.post_install_log.emit(f"Cleaned up: {target_script_path}") # type: ignore
                 except OSError as e: self.post_install_log.emit(f"Warning: Could not remove {target_script_path}: {e}") # type: ignore
 
+# MaiBloomInstallerApp UI structure remains the same
 class MaiBloomInstallerApp(QWidget):
     def __init__(self):
         super().__init__()
@@ -283,6 +286,7 @@ class MaiBloomInstallerApp(QWidget):
         self.log_output.ensureCursorVisible(); QApplication.processEvents() 
 
     def start_installation_process(self):
+        # --- Collect GUI Data ---
         hostname = self.hostname_input.text().strip()
         username = self.username_input.text().strip()
         password = self.password_input.text()
@@ -290,31 +294,31 @@ class MaiBloomInstallerApp(QWidget):
         locale_str = self.locale_input.text().strip()
         kb_layout = self.keyboard_layout_input.text().strip()
         timezone = self.timezone_input.text().strip()
-
         selected_disk_index = self.disk_combo.currentIndex()
+        profile_name = self.profile_combo.currentText()
+        wipe_disk_checked = self.wipe_disk_checkbox.isChecked()
+
+        # --- Validate Inputs ---
         if selected_disk_index < 0: 
             QMessageBox.warning(self, "Input Error", "Please select a target disk."); return
-        
         disk_data = self.disk_combo.itemData(selected_disk_index)
         if not disk_data or "path" not in disk_data or "size_bytes" not in disk_data:
             QMessageBox.critical(self, "Disk Error", "Selected disk data is invalid. Please re-scan disks."); return
         disk_path_str = disk_data["path"]
         disk_size_bytes = disk_data["size_bytes"]
-
-        profile_name = self.profile_combo.currentText()
-        wipe_disk_checked = self.wipe_disk_checkbox.isChecked()
-
+        
         if not all([hostname, username, password, locale_str, kb_layout, disk_path_str, timezone]):
             QMessageBox.warning(self, "Input Error", "Please fill in all required fields."); return
         if password != confirm_password:
             QMessageBox.warning(self, "Input Error", "Passwords do not match."); return
 
+        # --- Confirm with User ---
         confirm_msg_detail = f"<b>TARGET DISK: {disk_path_str}</b> ({disk_size_bytes / (1024**3):.2f} GB)\n"
         confirm_msg_detail += f"Hostname: {hostname}, Profile: {profile_name}\n"
         if wipe_disk_checked:
             confirm_msg_detail += f"<b>ALL DATA ON {disk_path_str} WILL BE ERASED and auto-partitioned!</b>\n"
         else:
-            confirm_msg_detail += f"<b>The disk {disk_path_str} will NOT be wiped. You MUST have compatible pre-existing partitions. This is an ADVANCED option.</b>\n"
+            confirm_msg_detail += f"<b>The disk {disk_path_str} will NOT be wiped. Using existing partitions (ADVANCED).</b>\n"
         confirm_msg_detail += "Are you absolutely sure you want to proceed?"
         
         reply = QMessageBox.question(self, 'Confirm Installation', confirm_msg_detail, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
@@ -324,8 +328,11 @@ class MaiBloomInstallerApp(QWidget):
         self.install_button.setEnabled(False); self.log_output.clear()
         self.log_output.append("Preparing JSON configuration for archinstall...")
 
+        # --- Build JSON Config Dictionary ---
         sys_lang_base = locale_str.split('.')[0] if '.' in locale_str else locale_str
         sys_enc = locale_str.split('.')[-1] if '.' in locale_str and locale_str.split('.')[-1] else "UTF-8"
+        is_efi = os.path.exists("/sys/firmware/efi")
+        default_packages_for_nm = ["networkmanager"]
 
         self.archinstall_json_config_data = {
             "hostname": hostname,
@@ -335,78 +342,62 @@ class MaiBloomInstallerApp(QWidget):
             "ntp": True, 
             "swap": True, 
             "users": [{"username": username, "password": password, "sudo": True}],
-            "packages": [],
-            "silent": True,
+            "packages": [], # Populated below
+            "silent": True, # *** Ensure this is true for non-interactive ***
             "audio_config": {"audio": "pipewire"},
+            "bootloader": "Systemd-boot" if is_efi else "Grub",
+            "network_config": {"type": "networkmanager"} 
         }
 
-        is_efi = os.path.exists("/sys/firmware/efi")
-        self.archinstall_json_config_data["bootloader"] = "Systemd-boot" if is_efi else "Grub"
-        self.archinstall_json_config_data["network_config"] = {"type": "networkmanager"}
-        default_packages_for_nm = ["networkmanager"]
-
+        # Disk Configuration JSON
         if wipe_disk_checked:
             partitions = []
             current_offset_mib_val = 1 
 
             if is_efi:
                 esp_size_mib_val = 512
+                # Basic check for minimum size
                 if (disk_size_bytes / (1024**2)) < (current_offset_mib_val + esp_size_mib_val + 20 * 1024): # Boot + min 20G Root
                     QMessageBox.critical(self, "Disk Too Small", "Not enough space for EFI partition and minimal root."); self.install_button.setEnabled(True); return
                 partitions.append({
                     "status": "create", "type": "primary", "fs_type": "fat32",
-                    "start": {"unit": "MiB", "value": current_offset_mib_val, "sector_size": None},
-                    "size": {"unit": "MiB", "value": esp_size_mib_val, "sector_size": None},
+                    # Removed sector_size key
+                    "start": {"unit": "MiB", "value": current_offset_mib_val}, 
+                    "size": {"unit": "MiB", "value": esp_size_mib_val}, 
                     "mountpoint": "/boot", "flags": ["boot", "esp"]
                 })
                 current_offset_mib_val += esp_size_mib_val
-            # Simple check if disk partition table might be GPT for BIOS boot partition (not perfect)
-            # A more robust way would be to use `lsblk -o TABLE` or similar
-            elif True: # Assuming BIOS boot might need bios_grub for GPT. For MBR, boot flag on root is handled later.
-                     # This is a simplification. A proper check for GPT on BIOS would be better.
-                # For now, we'll assume if not EFI, and disk is large, it might be GPT.
-                # This part can be improved by actually checking partition table type if needed.
-                # If we can't determine GPT, we skip bios_grub and rely on boot flag on root for MBR.
-                # Let's assume for now we only add bios_grub if we are *sure* it's GPT & BIOS.
-                # For simplicity, we will rely on the boot flag on root for BIOS/MBR for now.
-                pass
+            # Simplification: Assume MBR if not EFI, handle boot flag on root. Skip explicit bios_grub for now.
+            
+            min_disk_for_layout_mib = current_offset_mib_val + (20 * 1024)
+            if (disk_size_bytes / (1024**2)) < min_disk_for_layout_mib:
+                QMessageBox.critical(self, "Disk Too Small", f"Disk too small for layout (needs > {min_disk_for_layout_mib / 1024:.1f} GiB).")
+                self.install_button.setEnabled(True); return
 
-
-            # Root Partition: Aim for 50GiB, fallback to 20GiB, then take most if disk is very small.
             root_size_gib_val = 50
             available_mib_after_boot = (disk_size_bytes / (1024**2)) - current_offset_mib_val
-            
-            if available_mib_after_boot < (20 * 1024): # Less than 20GiB available after boot
-                 QMessageBox.critical(self, "Disk Too Small", f"Not enough space for root partition after boot. Available: {available_mib_after_boot/1024:.1f} GiB"); self.install_button.setEnabled(True); return
-            
-            if available_mib_after_boot < (root_size_gib_val * 1024): # Not enough for 50GiB root
-                if available_mib_after_boot >= (20 * 1024): # Enough for 20GiB root
-                    root_size_gib_val = 20
-                else: # Take all available for root if less than 20GiB (covered by check above, but as safety)
-                    root_size_gib_val = int(available_mib_after_boot / 1024)
-
+            if available_mib_after_boot < (20 * 1024):
+                 QMessageBox.critical(self, "Disk Too Small", f"Not enough space for root partition ({available_mib_after_boot/1024:.1f} GiB avail)."); self.install_button.setEnabled(True); return
+            if available_mib_after_boot < (root_size_gib_val * 1024): root_size_gib_val = 20
 
             root_flags = []
-            if not is_efi: # If BIOS
-                # We need to determine if MBR or GPT to set bios_grub or boot on root
-                # This is tricky without querying disk. Assuming MBR for simplicity if not EFI & no bios_grub yet:
-                root_flags.append("boot")
-
+            if not is_efi: root_flags.append("boot") # Assume MBR if not EFI, set boot flag on root
 
             partitions.append({
                 "status": "create", "type": "primary", "fs_type": "ext4",
-                "start": {"unit": "MiB", "value": current_offset_mib_val, "sector_size": None},
-                "size": {"unit": "GiB", "value": root_size_gib_val, "sector_size": None},
+                 # Removed sector_size key
+                "start": {"unit": "MiB", "value": current_offset_mib_val},
+                "size": {"unit": "GiB", "value": root_size_gib_val},
                 "mountpoint": "/", "flags": root_flags
             })
             home_start_mib_val = current_offset_mib_val + (root_size_gib_val * 1024)
 
-            # Home Partition (only if there's meaningful space left after root)
-            if (disk_size_bytes / (1024**2)) > (home_start_mib_val + 1024): # At least 1GiB for home
+            if (disk_size_bytes / (1024**2)) > (home_start_mib_val + 1024): # Min 1GiB for home
                 partitions.append({
                     "status": "create", "type": "primary", "fs_type": "ext4",
-                    "start": {"unit": "MiB", "value": home_start_mib_val, "sector_size": None},
-                    "size": {"unit": "Percent", "value": 100, "sector_size": None},
+                    # Removed sector_size key
+                    "start": {"unit": "MiB", "value": home_start_mib_val},
+                    "size": {"unit": "Percent", "value": 100}, 
                     "mountpoint": "/home", "flags": []
                 })
 
@@ -420,27 +411,32 @@ class MaiBloomInstallerApp(QWidget):
             self.archinstall_json_config_data["disk_config"] = {"config_type": "manual_partitioning"}
             self.log_output.append("Disk wipe not selected. User responsible for pre-partitioned disk.")
 
+        # Profile Configuration
         if profile_name:
             profile_name_lower = profile_name.lower()
-            self.archinstall_json_config_data["profile_config"] = {"profile": {"main": profile_name_lower}}
-            if profile_name_lower == "kde":
-                 self.archinstall_json_config_data["profile_config"]["greeter"] = "sddm"
-                 # "gfx_driver" can often be omitted to let archinstall pick defaults or profile handle it
-            elif profile_name_lower == "gnome":
-                 self.archinstall_json_config_data["profile_config"]["greeter"] = "gdm"
+            profile_config = {"profile": {"main": profile_name_lower}}
+            # Add greeter based on profile, as per example's pattern if needed by archinstall version
+            if profile_name_lower == "kde": profile_config["greeter"] = "sddm"
+            elif profile_name_lower == "gnome": profile_config["greeter"] = "gdm"
+            self.archinstall_json_config_data["profile_config"] = profile_config
         
+        # Package Selection
         final_packages = default_packages_for_nm[:]
         for category, checkbox in self.app_category_checkboxes.items():
             if checkbox.isChecked(): final_packages.extend(APP_CATEGORIES[category])
+        # Ensure base-devel is handled correctly if selected (it's a group)
+        # For JSON, just listing 'base-devel' might work, archinstall handles groups.
         self.archinstall_json_config_data["packages"] = list(set(final_packages))
         
         self.log_output.append("JSON Configuration prepared for Archinstall thread.")
-        # self.log_output.append(json.dumps(self.archinstall_json_config_data, indent=2)) # Logged by thread
 
+        # --- Start Installation Thread ---
         self.installer_thread = ArchinstallThread(self.archinstall_json_config_data)
         self.installer_thread.installation_log.connect(self.update_log)
         self.installer_thread.installation_finished.connect(self.on_installation_finished)
         self.installer_thread.start()
+
+    # on_installation_finished, run_post_install_script, on_post_install_finished remain the same
 
     def on_installation_finished(self, success, message):
         self.update_log(message)
@@ -452,7 +448,7 @@ class MaiBloomInstallerApp(QWidget):
             else:
                 self.install_button.setEnabled(True); self.log_output.append("No post-install script.")
         else:
-            QMessageBox.critical(self, "Installation Failed", f"Installation failed.\n{message}") # Message now includes stderr from thread
+            QMessageBox.critical(self, "Installation Failed", f"Installation failed.\n{message}") 
             self.install_button.setEnabled(True)
 
     def run_post_install_script(self, target_mount_point):
@@ -474,7 +470,6 @@ if __name__ == '__main__':
     if not check_root():
         print("Error: This application must be run as root (or with sudo).")
         sys.exit(1)
-
     app = QApplication(sys.argv)
     installer = MaiBloomInstallerApp()
     installer.show()
