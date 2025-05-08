@@ -211,7 +211,7 @@ class MaiBloomInstallerApp(QWidget):
 
         self.disk_combo = QComboBox()
         self.disk_combo.setToolTip("Select the target disk for installation. <b>ALL DATA ON THIS DISK WILL BE ERASED by default.</b>")
-        disk_layout.addWidget(self.create_form_row("Target Disk:", self.disk_combo))
+        disk_layout.addLayout(self.create_form_row("Target Disk:", self.disk_combo))
         disk_layout.addWidget(QLabel("<small>Ensure you select the correct disk. This is irreversible if 'Wipe Disk' is checked.</small>"))
 
         self.wipe_disk_checkbox = QCheckBox("Wipe selected disk (Auto-partition & Format)")
@@ -284,7 +284,7 @@ class MaiBloomInstallerApp(QWidget):
         self.profile_combo.setToolTip("Select a base system profile or desktop environment.\n'minimal' is a very basic system. Others install a full desktop.")
         # These should ideally be fetched from archinstall or be well-tested known profiles.
         self.profile_combo.addItems(["kde", "gnome", "xfce4", "minimal", "server", "i3"]) # Added i3 as example
-        software_layout.addWidget(self.create_form_row("Desktop/Profile:", self.profile_combo))
+        software_layout.addLayout(self.create_form_row("Desktop/Profile:", self.profile_combo))
 
         software_layout.addWidget(QLabel("<b>Additional Application Categories (Optional):</b>"))
         self.app_category_checkboxes = {}
