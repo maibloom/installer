@@ -457,7 +457,7 @@ class MaiBloomInstaller(QWidget):
             "disk_config": {"config_type": "default_layout", "device_modifications": [{"device": self.config.get("disk_target"), "wipe": True}]},
             "profile_config": {"gfx_driver": "All open-source (default)", "greeter": "sddm", "profile": {"details": ["KDE Plasma"], "main": "Desktop"}},
             "audio_config": {"audio": "pipewire"}, "bootloader": "Systemd-boot", "kernels": ["linux"],
-            "swap": True, "ntp": True, "debug": False, "version": "2.8.6", # Using user's example version
+            "swap": True, "ntp": True, "debug": False, "version": "3.0.4", # Using user's example version
             "packages": [] # Base packages, will be extended by categories
         }
 
