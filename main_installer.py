@@ -25,7 +25,7 @@ def check_root():
     return os.geteuid() == 0
 
 # --- Archinstall Interaction Thread (JSON + CLI) ---
-# No changes needed in ArchinstallThread itself from the previous JSON version
+# This thread remains the same as the previous JSON version
 class ArchinstallThread(QThread):
     installation_finished = pyqtSignal(bool, str)
     installation_log = pyqtSignal(str)
@@ -44,7 +44,7 @@ class ArchinstallThread(QThread):
                 json.dump(self.config_data, f, indent=2)
 
             self.installation_log.emit(f"Archinstall JSON configuration saved to {self.config_file_path}")
-            # Optionally log the config only if needed for debugging, can be verbose
+            # Comment out verbose logging of the full config unless debugging
             # self.installation_log.emit(f"Full JSON configuration:\n{json.dumps(self.config_data, indent=2)}")
             self.installation_log.emit("Starting Arch Linux installation process via archinstall CLI...")
             self.installation_log.emit("This may take a while. Please be patient.")
@@ -53,20 +53,19 @@ class ArchinstallThread(QThread):
 
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, universal_newlines=True)
 
-            # Stream stdout
             stdout_lines = []
             if process.stdout:
                 for line in iter(process.stdout.readline, ''):
                     line_strip = line.strip()
                     self.installation_log.emit(line_strip)
-                    stdout_lines.append(line_strip) # Keep history if needed
+                    stdout_lines.append(line_strip)
                 process.stdout.close()
 
-            # Capture stderr
             stderr_output = ""
             if process.stderr:
                 stderr_output = process.stderr.read()
                 if stderr_output:
+                    # Log the full stderr for debugging
                     self.installation_log.emit(f"Archinstall STDERR:\n{stderr_output}")
                 process.stderr.close()
 
@@ -76,25 +75,21 @@ class ArchinstallThread(QThread):
                 self.installation_log.emit("Archinstall process completed successfully.")
                 self.installation_finished.emit(True, "Arch Linux installation successful!")
             else:
-                # Combine error code and stderr for the message
                 error_msg = f"Archinstall process failed with error code {ret_code}."
-                # Add last few lines of stderr containing the error if available
                 traceback_lines = [line for line in stderr_output.strip().split('\n') if line]
                 if traceback_lines:
                      error_msg += f"\nRelevant error output:\n---\n"
                      error_msg += "\n".join(traceback_lines[-15:]) # Show last 15 lines
                      error_msg += "\n---"
-                else:
-                    # Fallback to stdout if stderr was empty but process failed
+                elif stdout_lines: # Fallback if stderr is empty
                      error_msg += f"\nLast output lines:\n---\n"
                      error_msg += "\n".join(stdout_lines[-10:])
                      error_msg += "\n---"
 
-                self.installation_log.emit(error_msg) # Log full error details
+                self.installation_log.emit(f"Failure details recorded in log.") # Avoid repeating full trace in main log view if already shown once
                 # Provide a slightly shorter message for the popup
                 popup_error_msg = f"Archinstall process failed with error code {ret_code}.\nSee log for details."
-                self.installation_finished.emit(False, popup_error_msg)
-
+                self.installation_finished.emit(False, popup_error_msg) # Emit shorter message for popup
 
         except FileNotFoundError:
             err_msg = "Error: `archinstall` command not found. Is it installed and in your PATH?"
@@ -107,6 +102,7 @@ class ArchinstallThread(QThread):
             if os.path.exists(self.config_file_path):
                 try: os.remove(self.config_file_path)
                 except OSError as e: self.installation_log.emit(f"Warning: Could not remove temp config file {self.config_file_path}: {e}")
+
 
 # PostInstallThread remains the same
 class PostInstallThread(QThread):
@@ -190,7 +186,7 @@ class MaiBloomInstallerApp(QWidget):
         self.disk_combo.setToolTip("Select the target disk. <b>ALL DATA WILL BE ERASED if 'Wipe Disk' is checked.</b>")
         disk_layout_vbox.addLayout(self.create_form_row("Target Disk:", self.disk_combo))
         disk_layout_vbox.addWidget(QLabel("<small>Ensure correct disk selection. This is irreversible if 'Wipe Disk' is checked.</small>"))
-        self.wipe_disk_checkbox = QCheckBox("Wipe selected disk (Uses archinstall's default auto-partitioning)") # Tooltip updated
+        self.wipe_disk_checkbox = QCheckBox("Wipe selected disk (Uses archinstall's default auto-partitioning)")
         self.wipe_disk_checkbox.setChecked(True)
         self.wipe_disk_checkbox.setToolTip("Wipes disk and lets archinstall create its default layout (e.g., Boot, Root, Home).\nUncheck to use pre-existing partitions (advanced, requires manual setup).")
         disk_layout_vbox.addWidget(self.wipe_disk_checkbox)
@@ -269,20 +265,16 @@ class MaiBloomInstallerApp(QWidget):
         QApplication.processEvents()
         self.disk_combo.clear()
         try:
-            # Use lsblk to get disk info including size in bytes
-            result = subprocess.run(['lsblk', '-J', '-b', '-o', 'NAME,SIZE,TYPE,MODEL,PATH,TRAN,PKNAME'],
-                                    capture_output=True, text=True, check=True)
+            result = subprocess.run(['lsblk', '-J', '-b', '-o', 'NAME,SIZE,TYPE,MODEL,PATH,TRAN,PKNAME'], capture_output=True, text=True, check=True)
             data = json.loads(result.stdout)
             disks_found = 0
             for device in data.get('blockdevices', []):
-                # Filter for actual disks (no PKNAME), exclude loop, rom, and potentially USB for safety
                 if device.get('type') == 'disk' and not device.get('pkname') and device.get('tran') not in ['usb']:
                     name = f"/dev/{device.get('name', 'N/A')}"
                     model = device.get('model', 'Unknown Model')
                     size_bytes = int(device.get('size', 0))
                     size_gb = size_bytes / (1024**3)
                     display_text = f"{name} - {model} ({size_gb:.2f} GB)"
-                    # Store path and size_bytes in userData
                     self.disk_combo.addItem(display_text, userData={"path": name, "size_bytes": size_bytes})
                     self.log_output.append(f"Found disk: {display_text}")
                     disks_found += 1
@@ -312,7 +304,7 @@ class MaiBloomInstallerApp(QWidget):
         self.log_output.append(message)
         self.log_output.ensureCursorVisible(); QApplication.processEvents()
 
-    # start_installation_process MODIFIED for simplified JSON disk_config
+    # start_installation_process MODIFIED for MINIMAL JSON config
     def start_installation_process(self):
         hostname = self.hostname_input.text().strip()
         username = self.username_input.text().strip()
@@ -331,7 +323,7 @@ class MaiBloomInstallerApp(QWidget):
         if not disk_data or "path" not in disk_data or "size_bytes" not in disk_data:
             QMessageBox.critical(self, "Disk Error", "Selected disk data is invalid. Please re-scan disks."); return
         disk_path_str = disk_data["path"]
-        disk_size_bytes = disk_data["size_bytes"] # We have size now, but won't use for partition definition
+        disk_size_bytes = disk_data["size_bytes"]
 
         if not all([hostname, username, password, locale_str, kb_layout, disk_path_str, timezone]):
             QMessageBox.warning(self, "Input Error", "Please fill in all required fields."); return
@@ -351,58 +343,63 @@ class MaiBloomInstallerApp(QWidget):
             self.log_output.append("Installation cancelled by user."); return
 
         self.install_button.setEnabled(False); self.log_output.clear()
-        self.log_output.append("Preparing JSON configuration for archinstall...")
+        self.log_output.append("Preparing MINIMAL JSON configuration for archinstall...")
 
-        sys_lang_base = locale_str.split('.')[0] if '.' in locale_str else locale_str
-        sys_enc = locale_str.split('.')[-1] if '.' in locale_str and locale_str.split('.')[-1] else "UTF-8"
+        # --- Build the MINIMAL JSON config dictionary ---
         is_efi = os.path.exists("/sys/firmware/efi")
-        default_packages_for_nm = ["networkmanager"] # Ensure NM is installed if using networkmanager type
+        sys_lang_base = locale_str.split('.')[0] if '.' in locale_str else locale_str
+        # Encoding often defaults fine, omit for minimal config
+        # sys_enc = locale_str.split('.')[-1] if '.' in locale_str and locale_str.split('.')[-1] else "UTF-8"
 
-        self.archinstall_json_config_data = {
+        minimal_config_data = {
+            # Essential Settings from GUI
             "hostname": hostname,
-            "kernels": ["linux"],
-            "locale_config": {"sys_lang": sys_lang_base, "sys_enc": sys_enc, "kb_layout": kb_layout},
+            "locale_config": {
+                "sys_lang": sys_lang_base,
+                "kb_layout": kb_layout
+            },
             "timezone": timezone,
-            "ntp": True,
-            "swap": True, # Let archinstall manage swap file/partition creation with defaults
-            "users": [{"username": username, "password": password, "sudo": True}],
-            "packages": [],
-            "silent": True,
-            "audio_config": {"audio": "pipewire"},
             "bootloader": "Systemd-boot" if is_efi else "Grub",
-            "network_config": {"type": "networkmanager"}
-            # Omitting disk_config initially, will add based on wipe_disk_checked
+            "users": [{"username": username, "password": password, "sudo": True}],
+            "profile_config": {"profile": {"main": profile_name.lower()}} if profile_name else {},
+
+            # Disk Config (Simplified)
+            # Added below based on wipe_disk_checked
+
+            # Minimal Necessary Packages (Network + selected categories)
+            "packages": [], # Populated below
+
+            # Necessary Flags/Defaults for Automation
+            "silent": True,
+            "ntp": True, # Good default
+            "swap": True, # Good default (swap file)
+            # Omitting audio_config, kernels, mirror_config etc. to let archinstall handle defaults
         }
 
         # Simplified disk_config generation
         if wipe_disk_checked:
-            self.archinstall_json_config_data["disk_config"] = {
-                "config_type": "default_layout", # Use archinstall's default partitioning logic
-                "device_path": disk_path_str,    # Specify the target device
+            minimal_config_data["disk_config"] = {
+                "config_type": "default_layout",
+                "device_path": disk_path_str,
                 "wipe": True
             }
-            self.log_output.append(f"Configured disk_config for default layout on {disk_path_str} (wipe=True).")
+            self.log_output.append(f"Minimal config: using default layout on {disk_path_str} (wipe=True).")
         else:
-            self.archinstall_json_config_data["disk_config"] = {
-                "config_type": "manual_partitioning" # Rely on user's pre-existing setup
+            minimal_config_data["disk_config"] = {
+                "config_type": "manual_partitioning"
             }
-            self.log_output.append("Configured disk_config for manual partitioning (wipe=False). User is responsible for setup.")
+            self.log_output.append("Minimal config: using manual partitioning (wipe=False).")
 
-        # Profile Configuration
-        if profile_name:
-            profile_name_lower = profile_name.lower()
-            profile_config = {"profile": {"main": profile_name_lower}}
-            if profile_name_lower == "kde": profile_config["greeter"] = "sddm"
-            elif profile_name_lower == "gnome": profile_config["greeter"] = "gdm"
-            self.archinstall_json_config_data["profile_config"] = profile_config
-
-        # Package Selection
-        final_packages = default_packages_for_nm[:]
+        # Package Selection - Start with base requirement (networkmanager) + add user selections
+        final_packages = ["networkmanager"] # Ensure networking works
         for category, checkbox in self.app_category_checkboxes.items():
-            if checkbox.isChecked(): final_packages.extend(APP_CATEGORIES[category])
-        self.archinstall_json_config_data["packages"] = list(set(final_packages))
+            if checkbox.isChecked():
+                final_packages.extend(APP_CATEGORIES[category])
+        minimal_config_data["packages"] = list(set(final_packages)) # Add unique packages
 
-        self.log_output.append("JSON Configuration prepared for Archinstall thread.")
+        self.archinstall_json_config_data = minimal_config_data # Assign the built minimal config
+
+        self.log_output.append("Minimal JSON Configuration prepared for Archinstall thread.")
 
         # --- Start Installation Thread ---
         self.installer_thread = ArchinstallThread(self.archinstall_json_config_data)
@@ -448,4 +445,3 @@ if __name__ == '__main__':
     installer = MaiBloomInstallerApp()
     installer.show()
     sys.exit(app.exec_())
-
