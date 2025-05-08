@@ -116,25 +116,15 @@ class PostInstallThread(QThread):
             # Make script executable
             subprocess.run(["chmod", "+x", self.script_path], check=True)
 
-            # It's safer for the Python script to explicitly chroot
-            # The script is copied to the target system to avoid issues with mount points from host
-            # A more robust way is to copy the script into the chroot, then execute it there.
-            # For KISS, we'll try direct execution if the script itself is chroot-aware.
-            # Or, if archinstall allows running commands post-setup but before unmounting.
-
-            # Let's refine this: copy the script to the target, then arch-chroot
-            # This is more reliable.
             script_basename = os.path.basename(self.script_path)
             target_script_path = os.path.join(self.target_mount_point, "tmp", script_basename)
 
-            # Ensure /tmp exists in chroot
             os.makedirs(os.path.join(self.target_mount_point, "tmp"), exist_ok=True)
             subprocess.run(["cp", self.script_path, target_script_path], check=True)
             self.post_install_log.emit(f"Copied post-install script to {target_script_path}")
 
 
-            # Command to execute the script inside the chroot
-            chroot_script_internal_path = os.path.join("/tmp", script_basename) # Path inside the chroot
+            chroot_script_internal_path = os.path.join("/tmp", script_basename) 
             cmd = ["arch-chroot", self.target_mount_point, "/bin/bash", chroot_script_internal_path]
             self.post_install_log.emit(f"Executing in chroot: {' '.join(cmd)}")
 
@@ -170,7 +160,6 @@ class PostInstallThread(QThread):
             self.post_install_log.emit(f"Error running post-install script: {str(e)}")
             self.post_install_finished.emit(False, f"Error running post-install script: {str(e)}")
         finally:
-            # Clean up the copied script
             if 'target_script_path' in locals() and os.path.exists(target_script_path):
                 try:
                     os.remove(target_script_path)
@@ -189,18 +178,15 @@ class MaiBloomInstallerApp(QWidget):
 
     def init_ui(self):
         self.setWindowTitle('Mai Bloom OS Installer')
-        self.setGeometry(100, 100, 750, 650) # Adjusted size
+        self.setGeometry(100, 100, 750, 650) 
 
         main_layout = QVBoxLayout()
 
-        # --- Title ---
         title_label = QLabel("<b>Welcome to Mai Bloom OS Installation!</b>")
         title_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(title_label)
         main_layout.addWidget(QLabel("<small>This installer will guide you through setting up Mai Bloom OS (Arch Linux based). Please read explanations carefully.</small>"))
 
-
-        # --- Disk Selection ---
         disk_group = QGroupBox("Disk Setup")
         disk_layout = QVBoxLayout()
 
@@ -221,10 +207,8 @@ class MaiBloomInstallerApp(QWidget):
         disk_group.setLayout(disk_layout)
         main_layout.addWidget(disk_group)
 
-
-        # --- Basic System Settings ---
         system_group = QGroupBox("System Configuration")
-        system_layout = QGridLayout() # Using QGridLayout for better alignment
+        system_layout = QGridLayout() 
 
         self.hostname_input = QLineEdit()
         self.hostname_input.setPlaceholderText("mai-bloom-pc")
@@ -250,8 +234,6 @@ class MaiBloomInstallerApp(QWidget):
         system_group.setLayout(system_layout)
         main_layout.addWidget(system_group)
 
-
-        # --- User Account ---
         user_group = QGroupBox("User Account Setup")
         user_layout = QGridLayout()
 
@@ -275,15 +257,12 @@ class MaiBloomInstallerApp(QWidget):
         user_group.setLayout(user_layout)
         main_layout.addWidget(user_group)
 
-
-        # --- Software Selection ---
         software_group = QGroupBox("Software Selection")
         software_layout = QVBoxLayout()
 
         self.profile_combo = QComboBox()
         self.profile_combo.setToolTip("Select a base system profile or desktop environment.\n'minimal' is a very basic system. Others install a full desktop.")
-        # These should ideally be fetched from archinstall or be well-tested known profiles.
-        self.profile_combo.addItems(["kde", "gnome", "xfce4", "minimal", "server", "i3"]) # Added i3 as example
+        self.profile_combo.addItems(["kde", "gnome", "xfce4", "minimal", "server", "i3"]) 
         software_layout.addLayout(self.create_form_row("Desktop/Profile:", self.profile_combo))
 
         software_layout.addWidget(QLabel("<b>Additional Application Categories (Optional):</b>"))
@@ -295,15 +274,13 @@ class MaiBloomInstallerApp(QWidget):
             self.app_category_checkboxes[category].setToolTip(f"Install a collection of {category.lower()} applications.")
             app_cat_layout.addWidget(self.app_category_checkboxes[category], row, col)
             col += 1
-            if col > 1: # Two categories per row
+            if col > 1: 
                 col = 0
                 row += 1
         software_layout.addLayout(app_cat_layout)
         software_group.setLayout(software_layout)
         main_layout.addWidget(software_group)
 
-
-        # --- Post-install script ---
         post_install_group = QGroupBox("Custom Post-Installation")
         post_install_layout = QVBoxLayout()
         self.post_install_script_button = QPushButton("Select Post-Install Bash Script (Optional)")
@@ -315,19 +292,15 @@ class MaiBloomInstallerApp(QWidget):
         post_install_group.setLayout(post_install_layout)
         main_layout.addWidget(post_install_group)
 
-
-        # --- Installation Log ---
         log_group = QGroupBox("Installation Log")
         log_layout = QVBoxLayout()
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
-        self.log_output.setLineWrapMode(QTextEdit.NoWrap) # For better readability of logs
+        self.log_output.setLineWrapMode(QTextEdit.NoWrap) 
         log_layout.addWidget(self.log_output)
         log_group.setLayout(log_layout)
-        main_layout.addWidget(log_group) # Add to main_layout, not system_layout
+        main_layout.addWidget(log_group) 
 
-
-        # --- Install Button ---
         self.install_button = QPushButton("Start Installation")
         self.install_button.setStyleSheet("background-color: lightgreen; padding: 10px; font-weight: bold;")
         self.install_button.setToolTip("Begin the Mai Bloom OS installation with the selected settings.")
@@ -335,12 +308,12 @@ class MaiBloomInstallerApp(QWidget):
         main_layout.addWidget(self.install_button)
 
         self.setLayout(main_layout)
-        self.scan_and_populate_disks() # Initial scan
+        self.scan_and_populate_disks() 
 
     def create_form_row(self, label_text, widget):
         row_layout = QHBoxLayout()
         label = QLabel(label_text)
-        label.setFixedWidth(120) # Adjust for consistent alignment
+        label.setFixedWidth(120) 
         row_layout.addWidget(label)
         row_layout.addWidget(widget)
         return row_layout
@@ -350,15 +323,12 @@ class MaiBloomInstallerApp(QWidget):
         QApplication.processEvents()
         self.disk_combo.clear()
         try:
-            # Use lsblk for disk info. -b for bytes, -J for JSON.
-            # NAME,SIZE,TYPE,MODEL,PATH,TRAN (transport type, e.g. sata, nvme)
             result = subprocess.run(['lsblk', '-J', '-b', '-o', 'NAME,SIZE,TYPE,MODEL,PATH,TRAN'],
                                     capture_output=True, text=True, check=True)
             data = json.loads(result.stdout)
             disks_found = 0
             for device in data.get('blockdevices', []):
-                # Filter for disks, exclude loop devices, cd/dvd roms
-                if device.get('type') == 'disk' and device.get('tran') not in ['usb'] : # Basic filter, can be enhanced
+                if device.get('type') == 'disk' and device.get('tran') not in ['usb'] : 
                     name = f"/dev/{device.get('name', 'N/A')}"
                     model = device.get('model', 'Unknown Model')
                     size_bytes = int(device.get('size', 0))
@@ -399,8 +369,8 @@ class MaiBloomInstallerApp(QWidget):
 
     def update_log(self, message):
         self.log_output.append(message)
-        self.log_output.ensureCursorVisible() # Scroll to the bottom
-        QApplication.processEvents() # Keep UI responsive
+        self.log_output.ensureCursorVisible() 
+        QApplication.processEvents() 
 
     def start_installation_process(self):
         # --- Basic Validation ---
@@ -413,10 +383,10 @@ class MaiBloomInstallerApp(QWidget):
         timezone = self.timezone_input.text().strip()
 
         selected_disk_index = self.disk_combo.currentIndex()
-        if selected_disk_index < 0: # No disk selected
+        if selected_disk_index < 0: 
             QMessageBox.warning(self, "Input Error", "Please select a target disk after scanning.")
             return
-        disk = self.disk_combo.itemData(selected_disk_index) # Get the /dev/path from userData
+        disk = self.disk_combo.itemData(selected_disk_index) 
 
         profile = self.profile_combo.currentText()
         wipe_disk = self.wipe_disk_checkbox.isChecked()
@@ -450,10 +420,7 @@ class MaiBloomInstallerApp(QWidget):
         self.log_output.append("Starting installation preparation...")
 
         # --- Prepare archinstall configuration ---
-        # This structure MUST align with archinstall's --config JSON format.
-        # Check archinstall documentation or a generated config for the exact fields.
         self.archinstall_config = {
-            # "__hostname__": hostname, # Some archinstall versions prefix with __
             "hostname": hostname,
             "locale_config": {
                 "kb_layout": kb_layout,
@@ -461,48 +428,48 @@ class MaiBloomInstallerApp(QWidget):
                 "sys_lang": locale
             },
             "timezone": timezone,
-            "bootloader": "systemd-boot", # Default, make configurable if UEFI/BIOS detection is added
-            "efi": True, # Assume UEFI for simplicity. Needs detection (e.g., check /sys/firmware/efi)
-            "swap": True, # Let archinstall manage swap, or make configurable
+            "bootloader": "systemd-boot", # Will be adjusted by EFI detection later
+            "efi": True,                  # Will be adjusted by EFI detection later
+            "swap": True,
             "profile_config": {
-                "profile": {"main": profile} # Structure depends on archinstall version
+                "profile": {"main": profile}
             },
             "users": [
                 {
                     "username": username,
-                    "password": password, # archinstall will hash it
+                    "password": password,
                     "sudo": True
                 }
             ],
-            "kernels": ["linux"], # Default Arch kernel. Could add "linux-lts".
+            "kernels": ["linux"],
             "network_config": {
-                "type": "nm", # Use NetworkManager
+                "type": "nm",
             },
-            "packages": [], # For additional packages from categories
-            "silent": True, # To avoid archinstall's interactive prompts
-            # Disk configuration is crucial and complex.
-            # This relies on archinstall's auto-partitioning or guided partitioning features
-            # if "disk_layouts" is used as shown.
-            "disk_config": {
-                # This part needs to be carefully structured based on archinstall's expectations
-                "disk_layouts": {
-                    disk: { # The actual device path, e.g., /dev/sda
-                        "wipe": wipe_disk,
-                        # "layout_type": "auto" # Tells archinstall to auto-partition if wiping
-                                             # Or you define partitions here if not wiping or for custom.
-                        # If wipe_disk is true, archinstall should auto-partition.
-                        # If wipe_disk is false, archinstall expects partitions to be defined or existing.
-                        # For KISS, if wipe_disk is true, we rely on archinstall's default full disk wipe and auto-partition.
-                        # If wipe_disk is false, the user is on their own to provide a disk that archinstall can use
-                        # or the JSON config would need to describe the partitions.
-                    }
-                }
-            },
-            # "harddrives": [disk] # Simpler alternative for some archinstall versions if just targeting a disk to auto-setup
+            "packages": [], # Will be populated later
+            "silent": True,
+            # "disk_config" will be added based on wipe_disk logic below
         }
-        if wipe_disk:
-             self.archinstall_config["disk_config"]["disk_layouts"][disk]["layout_type"] = "auto"
 
+        # --- Define disk_config based on wipe_disk ---
+        if wipe_disk:
+            disk_configuration = {
+                "config_type": "default_layout",  # Use archinstall's default partitioning scheme
+                "device_path": disk,              # The disk to apply the layout to
+                "wipe": True                      # Confirm that the device will be wiped
+            }
+            self.log_output.append(f"Disk Setup: Wiping {disk} and applying default layout.")
+        else:
+            # User intends to use pre-existing partitions.
+            # Archinstall should not perform layout operations.
+            # NOTE: For a silent install, 'mount_points' would typically need to be
+            # explicitly defined elsewhere in the config for this to work reliably.
+            # This GUI does not currently collect that information.
+            disk_configuration = {
+                "config_type": "manual_partitioning" # Signals that partitioning is handled manually/externally
+            }
+            self.log_output.append(f"Disk Setup: Using pre-existing partitions on {disk}. Ensure mount points are configured if needed by archinstall.")
+
+        self.archinstall_config["disk_config"] = disk_configuration
 
         # Add packages from selected categories
         selected_packages = []
@@ -550,8 +517,6 @@ class MaiBloomInstallerApp(QWidget):
 
     def run_post_install_script(self):
         self.log_output.append("\n--- Starting Post-Installation Script ---")
-        # Default mount point for archinstall is /mnt/archinstall
-        # If your archinstall version uses something else, adjust here.
         target_mount = self.archinstall_config.get("mount_point", "/mnt/archinstall")
 
         self.post_installer_thread = PostInstallThread(self.post_install_script_path, target_mount_point=target_mount)
@@ -572,10 +537,7 @@ class MaiBloomInstallerApp(QWidget):
 if __name__ == '__main__':
     if not check_root():
         print("Error: This application must be run as root (or with sudo) to perform installation tasks.")
-        # Attempt to show a simple Qt message box even if full app doesn't init
-        # This is tricky as QApplication might not be running yet.
-        # For simplicity, console print and exit is more reliable here.
-        app_temp = QApplication.instance() # Check if an instance already exists
+        app_temp = QApplication.instance() 
         if not app_temp:
             app_temp = QApplication(sys.argv)
         QMessageBox.critical(None, "Root Access Required", "This installer must be run with root privileges (e.g., using sudo).\nPlease restart the application as root.")
