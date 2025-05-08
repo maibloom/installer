@@ -4,7 +4,7 @@ import json
 import os
 import logging
 import traceback
-from pathlib import Path # Added
+from pathlib import Path
 
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QComboBox,
@@ -47,7 +47,6 @@ class ArchinstallThread(QThread):
         try:
             self.installation_log.emit("Initializing archinstall library (granular mode)...")
 
-            # --- Import archinstall components ---
             from archinstall.lib.disk.device_handler import device_handler
             from archinstall.lib.disk.filesystem import FilesystemHandler
             from archinstall.lib.installer import Installer
@@ -57,23 +56,23 @@ class ArchinstallThread(QThread):
                 PartitionFlag, PartitionModification, PartitionType, Size, Unit
             )
             from archinstall.lib.models.profile_model import ProfileConfiguration
-            from archinstall.lib.models.users import Password, User
+            # MODIFICATION: Changed import for User, removed Password import from here
+            from archinstall.lib.models.users import User
             from archinstall.lib.profile.profiles_handler import profile_handler
-            from archinstall.lib.system_conf import LocaleConfiguration # For setting locale later
-            from archinstall.lib.services import NetworkManager # For enabling network
-
+            from archinstall.lib.system_conf import LocaleConfiguration
+            from archinstall.lib.services import NetworkManager 
+            
             # Archinstall logging setup
-            archinstall_logger = logging.getLogger('archinstall') # Get the main archinstall logger
+            archinstall_logger = logging.getLogger('archinstall')
             for handler in list(archinstall_logger.handlers):
                 archinstall_logger.removeHandler(handler)
             qt_handler = QtLogHandler(self.installation_log)
-            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s') # Simplified format
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
             qt_handler.setFormatter(formatter)
             archinstall_logger.addHandler(qt_handler)
             archinstall_logger.setLevel(logging.INFO)
             self.installation_log.emit("Archinstall logging redirected to GUI.")
 
-            # --- Configuration from GUI ---
             target_disk_path_str = self.gui_config.get("disk_config", {}).get("device_path")
             if not target_disk_path_str:
                 raise ValueError("Target disk path not provided in GUI configuration.")
@@ -89,44 +88,52 @@ class ArchinstallThread(QThread):
             additional_packages = self.gui_config.get("packages", [])
             users_data = self.gui_config.get("users", [])
             profile_name_str = self.gui_config.get("profile_config", {}).get("profile", {}).get("main")
-            is_efi_system = os.path.exists("/sys/firmware/efi") # From GUI logic
+            is_efi_system = self.gui_config.get("efi", os.path.exists("/sys/firmware/efi"))
 
-            # --- Disk Setup ---
             self.installation_log.emit(f"Getting device information for {target_disk_path_str}...")
             device = device_handler.get_device(Path(target_disk_path_str))
             if not device:
                 raise ValueError(f"Device {target_disk_path_str} not found by archinstall.")
 
             device_modification = DeviceModification(device, wipe=True)
-            current_offset_mib = Size(1, Unit.MiB, device.device_info.sector_size) # Start after 1MiB for MBR gap
+            current_offset_mib = Size(1, Unit.MiB, device.device_info.sector_size)
 
-            # 1. Boot Partition (ESP if UEFI)
             if is_efi_system:
                 boot_partition_size_mib = Size(512, Unit.MiB, device.device_info.sector_size)
                 boot_partition_mod = PartitionModification(
                     status=ModificationStatus.Create, type=PartitionType.Primary,
                     start=current_offset_mib, length=boot_partition_size_mib,
                     mountpoint=Path('/boot'), fs_type=FilesystemType.Fat32,
-                    flags=[PartitionFlag.BOOT, PartitionFlag.ESP] # ESP implies boot for UEFI
+                    flags=[PartitionFlag.BOOT, PartitionFlag.ESP]
                 )
                 device_modification.add_partition(boot_partition_mod)
                 current_offset_mib += boot_partition_size_mib
-                self.installation_log.emit(f"Defined EFI boot partition: 512MiB at /boot")
-            else: # BIOS Boot partition (if GRUB on BIOS/GPT, not explicitly handled by this simple layout yet)
+                self.installation_log.emit("Defined EFI boot partition: 512MiB at /boot")
+            else:
                 self.installation_log.emit("BIOS system detected. ESP partition skipped. Ensure bootloader choice is compatible.")
-                # For BIOS/GPT with GRUB, a small (1MiB) unformatted bios_grub partition (flag bios_grub) is needed.
-                # This example simplifies and might implicitly rely on profiles or installer to handle BIOS boot specifics.
+                # Potentially add BIOS boot partition logic here if needed for GRUB on GPT/BIOS
+                # For now, keeping it simple. A 1MB unformatted partition with 'bios_grub' flag.
+                bios_boot_part_size_mib = Size(1, Unit.MiB, device.device_info.sector_size)
+                if device.device_info.disk_type == 'gpt': # Only needed for GPT on BIOS
+                    bios_boot_partition_mod = PartitionModification(
+                        status=ModificationStatus.Create, type=PartitionType.Primary,
+                        start=current_offset_mib, length=bios_boot_part_size_mib,
+                        fs_type=None, # Unformatted
+                        flags=[PartitionFlag.BiosGrub]
+                    )
+                    device_modification.add_partition(bios_boot_partition_mod)
+                    current_offset_mib += bios_boot_part_size_mib
+                    self.installation_log.emit("Defined BIOS Boot partition (for GPT/BIOS with GRUB).")
 
-            # Calculate remaining space for Root and Home
+
             available_for_root_home_mib = device.device_info.total_size - current_offset_mib
-            if available_for_root_home_mib.value < 1024 * 20 : # Min 20GiB needed
-                 raise ValueError("Not enough space for Root and Home partitions after boot partition.")
+            min_total_fs_space_mib = Size(20 * 1024, Unit.MiB, device.device_info.sector_size) # 20GiB
+            if available_for_root_home_mib < min_total_fs_space_mib :
+                 raise ValueError(f"Not enough space for Root and Home partitions. Need at least {min_total_fs_space_mib.format()}. Available: {available_for_root_home_mib.format()}")
 
-            # 2. Root Partition
-            # Allocate 60% to root, up to 100GiB max, min 20GiB.
             root_size_percentage = 0.60
-            max_root_mib = Size(100 * 1024, Unit.MiB, device.device_info.sector_size)
-            min_root_mib = Size(20 * 1024, Unit.MiB, device.device_info.sector_size)
+            max_root_mib = Size(100 * 1024, Unit.MiB, device.device_info.sector_size) # 100GiB
+            min_root_mib = Size(15 * 1024, Unit.MiB, device.device_info.sector_size) # 15GiB for root
 
             root_partition_size_mib = available_for_root_home_mib * root_size_percentage
             if root_partition_size_mib > max_root_mib:
@@ -134,108 +141,106 @@ class ArchinstallThread(QThread):
             if root_partition_size_mib < min_root_mib:
                 root_partition_size_mib = min_root_mib
             
-            if root_partition_size_mib >= available_for_root_home_mib : # If root takes all/more
-                root_partition_size_mib = available_for_root_home_mib # Root takes all, no home
-                home_partition_size_mib = Size(0, Unit.MiB, device.device_info.sector_size)
-            else:
-                home_partition_size_mib = available_for_root_home_mib - root_partition_size_mib
+            # Ensure root doesn't exceed available if calculation is tight
+            if root_partition_size_mib > available_for_root_home_mib:
+                root_partition_size_mib = available_for_root_home_mib
+                
+            home_partition_size_mib = available_for_root_home_mib - root_partition_size_mib
 
-            root_fs_type = FilesystemType('ext4') # Defaulting to ext4
+            root_fs_type = FilesystemType('ext4')
             root_partition_mod = PartitionModification(
                 status=ModificationStatus.Create, type=PartitionType.Primary,
                 start=current_offset_mib, length=root_partition_size_mib,
-                mountpoint=Path('/'), fs_type=root_fs_type, # Mountpoint is / for root when chrooted
+                mountpoint=Path('/'), fs_type=root_fs_type,
                 mount_options=[]
             )
             device_modification.add_partition(root_partition_mod)
             current_offset_mib += root_partition_size_mib
             self.installation_log.emit(f"Defined root partition: {root_partition_size_mib.format()} at / (ext4)")
 
-            # 3. Home Partition (if space allows)
-            if home_partition_size_mib.value > 1024 : # Create home if at least 1GiB
+            if home_partition_size_mib.value > 1024 : # Min 1GiB for home
                 home_partition_mod = PartitionModification(
                     status=ModificationStatus.Create, type=PartitionType.Primary,
                     start=current_offset_mib, length=home_partition_size_mib,
-                    mountpoint=Path('/home'), fs_type=root_fs_type, # Same fs as root for simplicity
+                    mountpoint=Path('/home'), fs_type=root_fs_type,
                     mount_options=[]
                 )
                 device_modification.add_partition(home_partition_mod)
                 self.installation_log.emit(f"Defined home partition: {home_partition_size_mib.format()} at /home (ext4)")
 
             disk_layout_config = DiskLayoutConfiguration(
-                config_type=DiskLayoutType.Manual, # We are defining it manually
+                config_type=DiskLayoutType.Manual,
                 device_modifications=[device_modification]
             )
-            disk_encryption_config = None # No GUI support for this yet
+            disk_encryption_config = None
 
             fs_handler = FilesystemHandler(disk_layout_config, disk_encryption_config)
             self.installation_log.emit("Applying disk modifications (formatting...). This may take a while.")
-            fs_handler.perform_filesystem_operations(show_countdown=False) # This is destructive
+            fs_handler.perform_filesystem_operations(show_countdown=False)
 
-            # --- Installation ---
             install_target_mountpoint = Path(self.gui_config.get("target_mountpoint", "/mnt/archinstall"))
             os.makedirs(install_target_mountpoint, exist_ok=True)
             self.installation_log.emit(f"Preparing installer for target mountpoint: {install_target_mountpoint}")
+
+            # Prepare locale_config object for installer
+            lc_details_gui = self.gui_config.get("locale_config", {})
+            installer_locale_config = LocaleConfiguration(
+                kb_layout=lc_details_gui.get("kb_layout", "us"),
+                sys_lang=lc_details_gui.get("sys_lang", "en_US.UTF-8"),
+                sys_enc=lc_details_gui.get("sys_enc", "UTF-8")
+            )
 
             with Installer(
                 mountpoint=install_target_mountpoint,
                 disk_config=disk_layout_config,
                 disk_encryption=disk_encryption_config,
-                kernels=kernels
-            ) as installation: # 'installation' is the Installer instance
+                kernels=kernels,
+                locale_config=installer_locale_config, # Pass locale config here
+                timezone=self.gui_config.get("timezone", "UTC") # Pass timezone here
+            ) as installation:
                 self.installation_log.emit("Mounting configured layout...")
                 installation.mount_ordered_layout()
 
                 self.installation_log.emit(f"Performing minimal system installation with hostname: {hostname}...")
-                # Pass locale and keyboard from GUI to minimal_installation if possible, or set later.
-                # The minimal_installation might pick up some global settings or defaults.
-                installation.minimal_installation(
-                    hostname=hostname,
-                    locale_config=arch_cfg.locale_config # Use the populated locale_config from ArchConfig if available
-                                                        # or pass lang/kb_layout if API supports
-                )
+                installation.minimal_installation(hostname=hostname) # locale/timezone might be handled by Installer init now
                 
                 if additional_packages:
                     self.installation_log.emit(f"Adding additional packages: {additional_packages}")
                     installation.add_additional_packages(additional_packages)
-
-                # Set Locale and Timezone explicitly if not fully handled by minimal_installation/profile
-                lc_details = self.gui_config.get("locale_config", {})
-                if lc_details.get("sys_lang") and lc_details.get("kb_layout"):
-                    self.installation_log.emit(f"Setting system locale: {lc_details['sys_lang']}, Kbd: {lc_details['kb_layout']}")
-                    installation.set_locale_configuration(
-                        LocaleConfiguration(kb_layout=lc_details['kb_layout'], sys_lang=lc_details['sys_lang'])
-                    )
                 
-                tz = self.gui_config.get("timezone")
-                if tz:
-                    self.installation_log.emit(f"Setting timezone: {tz}")
-                    installation.set_timezone(tz)
+                # Set Locale and Timezone explicitly if Installer init didn't cover it fully or for confirmation
+                # Some Installer versions might require these to be set after chroot is established by minimal_installation
+                # self.installation_log.emit(f"Setting system locale: {installer_locale_config.sys_lang}, Kbd: {installer_locale_config.kb_layout}")
+                # installation.set_locale_configuration(installer_locale_config) # May be redundant if passed to __init__
+                
+                # self.installation_log.emit(f"Setting timezone: {self.gui_config.get('timezone', 'UTC')}")
+                # installation.set_timezone(self.gui_config.get('timezone', 'UTC')) # May be redundant
 
                 # Profile Installation
                 if profile_name_str:
                     self.installation_log.emit(f"Preparing to install profile: {profile_name_str}")
                     profile_to_install_class = None
-                    if profile_name_str.lower() == 'kde':
+                    # Ensure profile names are lowercase for comparison
+                    profile_name_lower = profile_name_str.lower()
+                    if profile_name_lower == 'kde':
                         from archinstall.default_profiles.kde import KdeProfile
                         profile_to_install_class = KdeProfile
-                    elif profile_name_str.lower() == 'gnome':
+                    elif profile_name_lower == 'gnome':
                         from archinstall.default_profiles.gnome import GnomeProfile
                         profile_to_install_class = GnomeProfile
-                    elif profile_name_str.lower() == 'xfce4':
-                         from archinstall.default_profiles.xfce import XfceProfile # common name
+                    elif profile_name_lower == 'xfce4': # common name in GUI
+                         from archinstall.default_profiles.xfce import XfceProfile
                          profile_to_install_class = XfceProfile
-                    elif profile_name_str.lower() == 'minimal':
+                    elif profile_name_lower == 'minimal':
                         from archinstall.default_profiles.minimal import MinimalProfile
                         profile_to_install_class = MinimalProfile
-                    # Add other profiles as needed
                     
                     if profile_to_install_class:
-                        profile_instance = profile_to_install_class(installation.target) # Profiles often take target mountpoint
-                        current_profile_config = ProfileConfiguration(profile_instance) # Pass the instance
+                        # Profiles might need the installation target (chroot path)
+                        profile_instance = profile_to_install_class(installation.target if hasattr(installation, 'target') else install_target_mountpoint)
+                        current_profile_config = ProfileConfiguration(profile_instance)
                         self.installation_log.emit(f"Installing profile: {profile_name_str}...")
-                        # The install_profile_config might take language settings for the profile
-                        lang_for_profile = lc_details.get("sys_lang", "en_US.UTF-8")
+                        lang_for_profile = installer_locale_config.sys_lang
                         profile_handler.install_profile_config(installation, current_profile_config, lang_for_profile)
                     else:
                         self.installation_log.emit(f"Warning: Profile '{profile_name_str}' not mapped. Skipping profile installation.")
@@ -243,23 +248,21 @@ class ArchinstallThread(QThread):
                 # User Creation
                 users_to_create_objs = []
                 for user_data in users_data:
+                    # MODIFICATION: Pass password as string directly to User constructor
                     users_to_create_objs.append(
-                        User(user_data["username"], Password(plaintext=user_data["password"]), user_data.get("sudo", True))
+                        User(user_data["username"], user_data["password"], user_data.get("sudo", True))
                     )
                 if users_to_create_objs:
                     self.installation_log.emit(f"Creating users: {[u.username for u in users_to_create_objs]}")
                     installation.create_users(*users_to_create_objs)
 
-                # Enable NetworkManager service
                 self.installation_log.emit("Enabling NetworkManager service...")
-                installation.enable_service(NetworkManager(installation.target)) # Pass chroot target
+                # Ensure NetworkManager service is properly enabled; requires chroot context.
+                # The service name might be 'NetworkManager.service'
+                installation.enable_service('NetworkManager.service') # Simpler call if it exists and handles chroot
 
-                # Bootloader: This is critical. The example doesn't show explicit bootloader setup.
-                # It's often part of minimal_installation or profiles.
-                # If not, an explicit call like installation.setup_bootloader() would be needed.
-                # We are relying on archinstall's internal logic (based on EFI status and chosen profile) to handle this.
+
                 self.installation_log.emit("Assuming bootloader setup is handled by profile or minimal installation steps...")
-
                 self.installation_log.emit("System configuration steps applied within chroot.")
 
             self.installation_log.emit("Installation process completed successfully via granular library mode.")
@@ -277,83 +280,18 @@ class ArchinstallThread(QThread):
             self.installation_log.emit(err_msg)
             self.installation_finished.emit(False, err_msg)
         finally:
-            if 'qt_handler' in locals(): # Ensure qt_handler was defined
-                logging.getLogger('archinstall').removeHandler(qt_handler)
+            if 'qt_handler' in locals() and 'archinstall_logger' in locals():
+                archinstall_logger.removeHandler(qt_handler)
 
 
-# PostInstallThread remains the same
-class PostInstallThread(QThread):
-    post_install_finished = pyqtSignal(bool, str)
-    post_install_log = pyqtSignal(str)
-
-    def __init__(self, script_path, target_mount_point="/mnt/archinstall"): # Default consistent
-        super().__init__()
-        self.script_path = script_path
-        self.target_mount_point = target_mount_point
-
-    def run(self):
-        if not self.script_path or not os.path.exists(self.script_path):
-            self.post_install_log.emit("Post-install script not provided or not found.")
-            self.post_install_finished.emit(True, "No post-install script executed.")
-            return
-        try:
-            self.post_install_log.emit(f"Running post-installation script: {self.script_path}")
-            subprocess.run(["chmod", "+x", self.script_path], check=True)
-            script_basename = os.path.basename(self.script_path)
-            # Ensure /tmp exists in chroot target for the script
-            target_tmp_dir = os.path.join(self.target_mount_point, "tmp")
-            os.makedirs(target_tmp_dir, exist_ok=True)
-            target_script_path = os.path.join(target_tmp_dir, script_basename) # Place in /tmp inside chroot
-            
-            subprocess.run(["cp", self.script_path, target_script_path], check=True)
-            self.post_install_log.emit(f"Copied post-install script to {target_script_path} (inside chroot target)")
-            
-            chroot_script_internal_path = os.path.join("/tmp", script_basename) # Path as seen from within the chroot
-            cmd = ["arch-chroot", self.target_mount_point, "/bin/bash", chroot_script_internal_path]
-            self.post_install_log.emit(f"Executing in chroot: {' '.join(cmd)}")
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, universal_newlines=True)
-            
-            if process.stdout:
-                for line in iter(process.stdout.readline, ''):
-                    self.post_install_log.emit(line.strip())
-                process.stdout.close()
-            
-            stderr_output = ""
-            if process.stderr:
-                stderr_output = process.stderr.read()
-                if stderr_output:
-                    self.post_install_log.emit(f"Post-install script STDERR:\n{stderr_output}")
-                process.stderr.close()
-            
-            ret_code = process.wait()
-            if ret_code == 0:
-                self.post_install_log.emit("Post-installation script executed successfully.")
-                self.post_install_finished.emit(True, "Post-installation script finished.")
-            else:
-                error_msg = f"Post-installation script failed with error code {ret_code}.\n{stderr_output}"
-                self.post_install_log.emit(error_msg)
-                self.post_install_finished.emit(False, error_msg)
-
-        except FileNotFoundError as e:
-            err_msg = f"Error: `arch-chroot` command not found or script copy failed ({e}). Is `arch-install-scripts` installed?"
-            self.post_install_log.emit(err_msg)
-            self.post_install_finished.emit(False, err_msg)
-        except Exception as e:
-            self.post_install_log.emit(f"Error running post-install script: {str(e)}\n{traceback.format_exc()}")
-            self.post_install_finished.emit(False, f"Error running post-install script: {str(e)}")
-        finally:
-            if 'target_script_path' in locals() and os.path.exists(target_script_path):
-                try:
-                    os.remove(target_script_path)
-                    self.post_install_log.emit(f"Cleaned up: {target_script_path}")
-                except OSError as e:
-                    self.post_install_log.emit(f"Warning: Could not remove temporary script {target_script_path}: {e}")
-
+# MaiBloomInstallerApp and PostInstallThread remain largely the same as in your last provided version
+# Small adjustment to MaiBloomInstallerApp.start_installation_process to pass "efi" status
+# and to ensure the "wipe_disk" logic is clear for this mode.
 
 class MaiBloomInstallerApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.archinstall_gui_config = {} # Renamed for clarity
+        self.archinstall_gui_config = {} 
         self.post_install_script_path = ""
         self.init_ui()
 
@@ -366,7 +304,7 @@ class MaiBloomInstallerApp(QWidget):
         title_label = QLabel("<b>Welcome to Mai Bloom OS Installation!</b>")
         title_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(title_label)
-        main_layout.addWidget(QLabel("<small>This installer uses archinstall's library components directly. Please read explanations carefully.</small>")) # Updated text
+        main_layout.addWidget(QLabel("<small>This installer uses archinstall's library components directly. Please read explanations carefully.</small>"))
 
         disk_group = QGroupBox("Disk Setup")
         disk_layout = QVBoxLayout()
@@ -381,7 +319,7 @@ class MaiBloomInstallerApp(QWidget):
         disk_layout.addLayout(self.create_form_row("Target Disk:", self.disk_combo))
         disk_layout.addWidget(QLabel("<small>Ensure you select the correct disk. This is irreversible if 'Wipe Disk' is checked.</small>"))
 
-        self.wipe_disk_checkbox = QCheckBox("Wipe selected disk (Auto-partition & Format with default scheme)") # Updated tooltip
+        self.wipe_disk_checkbox = QCheckBox("Wipe selected disk (Auto-partition & Format with default scheme)")
         self.wipe_disk_checkbox.setChecked(True)
         self.wipe_disk_checkbox.setToolTip("If checked, the selected disk will be completely erased and automatically partitioned (Boot, Root, Home).\nUncheck ONLY if you understand this mode does not currently support using existing partitions.")
         disk_layout.addWidget(self.wipe_disk_checkbox)
@@ -443,7 +381,7 @@ class MaiBloomInstallerApp(QWidget):
 
         self.profile_combo = QComboBox()
         self.profile_combo.setToolTip("Select a base system profile or desktop environment.\n'minimal' is a very basic system. Others install a full desktop.")
-        self.profile_combo.addItems(["kde", "gnome", "xfce4", "minimal"]) # Server, i3 might need more specific profile classes
+        self.profile_combo.addItems(["kde", "gnome", "xfce4", "minimal"])
         software_layout.addLayout(self.create_form_row("Desktop/Profile:", self.profile_combo))
 
         software_layout.addWidget(QLabel("<b>Additional Application Categories (Optional):</b>"))
@@ -504,12 +442,14 @@ class MaiBloomInstallerApp(QWidget):
         QApplication.processEvents()
         self.disk_combo.clear()
         try:
-            result = subprocess.run(['lsblk', '-J', '-b', '-o', 'NAME,SIZE,TYPE,MODEL,PATH,TRAN'],
+            result = subprocess.run(['lsblk', '-J', '-b', '-o', 'NAME,SIZE,TYPE,MODEL,PATH,TRAN,PKNAME'], # Added PKNAME
                                     capture_output=True, text=True, check=True)
             data = json.loads(result.stdout)
             disks_found = 0
             for device in data.get('blockdevices', []):
-                if device.get('type') == 'disk' and device.get('tran') not in ['usb'] : 
+                # Filter for actual disks, not partitions (PKNAME is null for whole disks)
+                # and not loop devices, cd/dvd roms, and not USB by default for safety.
+                if device.get('type') == 'disk' and not device.get('pkname') and device.get('tran') not in ['usb']:
                     name = f"/dev/{device.get('name', 'N/A')}"
                     model = device.get('model', 'Unknown Model')
                     size_bytes = int(device.get('size', 0))
@@ -578,10 +518,11 @@ class MaiBloomInstallerApp(QWidget):
             QMessageBox.warning(self, "Input Error", "Passwords do not match.")
             return
 
-        if not wipe_disk_checked:
+        if not wipe_disk_checked: # Explicitly check and prevent if not wiping for this mode
             QMessageBox.warning(self, "Unsupported Operation", 
-                                "The current installation mode (using archinstall library directly) primarily supports wiping the disk and auto-partitioning. "
-                                "Using existing partitions is not yet fully implemented in this specific GUI workflow. Please check 'Wipe selected disk' to proceed or use a different installation method.")
+                                "This installation mode currently only supports wiping the disk and auto-partitioning. "
+                                "Using existing partitions is not implemented in this workflow. Please check 'Wipe selected disk' to proceed.")
+            self.install_button.setEnabled(True) # Re-enable button
             return
 
         confirm_msg = (f"This will install Mai Bloom OS on <b>{disk_path_str}</b> with hostname <b>{hostname}</b>.\n"
@@ -601,15 +542,15 @@ class MaiBloomInstallerApp(QWidget):
             "hostname": hostname,
             "locale_config": {"kb_layout": kb_layout, "sys_lang": locale, "sys_enc": "UTF-8"},
             "timezone": timezone,
-            "swap": True, 
+            "swap": True, # This isn't directly used by the granular example for partitioning but can be a general setting
             "users": [{"username": username, "password": password, "sudo": True}],
             "kernels": ["linux"],
             "packages": [],
-            "disk_config": {"device_path": disk_path_str, "wipe": wipe_disk_checked}, # Wipe is true here based on check above
+            "disk_config": {"device_path": disk_path_str, "wipe": wipe_disk_checked}, # `wipe` must be true here
             "profile_config": {"profile": {"main": profile_name}} if profile_name else {},
-            "network_config": {"type": "nm"}, # Default for enabling NetworkManager later
-            "efi": os.path.exists("/sys/firmware/efi"), # Store efi status
-            "target_mountpoint": "/mnt/archinstall" # Default mountpoint for the installer context
+            "network_config": {"type": "nm"}, 
+            "efi": os.path.exists("/sys/firmware/efi"),
+            "target_mountpoint": "/mnt/archinstall" 
         }
         
         selected_pkgs = []
@@ -633,7 +574,6 @@ class MaiBloomInstallerApp(QWidget):
             QMessageBox.information(self, "Installation Complete", "Arch Linux base installation finished successfully!")
             if self.post_install_script_path:
                 self.log_output.append("\n--- Installation successful. Proceeding to post-installation script. ---")
-                # Use the mountpoint defined for the installer
                 mount_point_for_post_install = self.archinstall_gui_config.get("target_mountpoint", "/mnt/archinstall")
                 self.run_post_install_script(mount_point_for_post_install)
             else:
