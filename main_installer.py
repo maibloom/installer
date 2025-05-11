@@ -1,281 +1,324 @@
 #!/usr/bin/env python3
-import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, simpledialog
-import subprocess
-import os
 import sys
+import os
+import subprocess
 import shlex
-import threading
-import time
+import time # For demonstration purposes or minor delays
+
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
+                             QPushButton, QLabel, QLineEdit, QTextEdit, 
+                             QGroupBox, QMessageBox, QScrollArea)
+from PyQt5.QtCore import pyqtSignal, QObject, QThread, Qt, QMetaObject
+from PyQt5.QtGui import QFont
 
 # --- Configuration (Same as your previous CLI script) ---
-DEFAULT_TARGET_MOUNT_POINT = "/mnt/archinstall"
+DEFAULT_TARGET_MOUNT_POINT = "/mnt/archinstall" 
 POST_INSTALL_SCRIPTS_DIR = "post_install_scripts"
 EXTRA_PACKAGES = [
     "neofetch", "htop", "firefox", "vlc",
-    # Add more Mai Bloom core packages
 ]
 MAI_BLOOM_SCRIPTS = [
     "01_basic_setup.sh",
     "02_desktop_config.sh",
-    # Add your script names here
 ]
 
-# --- Mai Bloom Installer GUI Application ---
-class MaiBloomInstallerApp:
-    def __init__(self, root_tk_window):
-        self.root = root_tk_window
-        self.root.title("Mai Bloom OS Installer")
-        self.root.geometry("750x550") # Adjusted size
+# --- Worker Signals for Threading ---
+class WorkerSignals(QObject):
+    log_message = pyqtSignal(str, bool)  # message, is_error (True/False)
+    finished = pyqtSignal(bool)          # success (True/False)
+    archinstall_launched = pyqtSignal(bool, str) # launched_successfully, message
 
-        # --- Variables ---
-        self.target_mount_point_var = tk.StringVar(value=DEFAULT_TARGET_MOUNT_POINT)
-        self.archinstall_process = None
+# --- Thread for launching Archinstall ---
+class ArchinstallLauncherThread(QThread):
+    signals = WorkerSignals()
 
-        # --- GUI Layout ---
-        # Top instruction
-        instruction_label = tk.Label(self.root, text="Welcome to the Mai Bloom OS Installer!", font=("Arial", 16))
-        instruction_label.pack(pady=10)
+    def __init__(self):
+        super().__init__()
 
-        # Frame for Step 1: Archinstall
-        step1_frame = ttk.LabelFrame(self.root, text="Step 1: Base Arch Linux Installation", padding=10)
-        step1_frame.pack(padx=10, pady=10, fill="x")
-
-        archinstall_intro_label = tk.Label(step1_frame, 
-                                           text="Click below to launch 'archinstall' in a new terminal window.\n"
-                                                "Follow its instructions to install the base Arch Linux system.\n"
-                                                "Note the root (/) mount point it uses for the new system.",
-                                           justify=tk.LEFT)
-        archinstall_intro_label.pack(pady=5, anchor="w")
-
-        self.launch_archinstall_button = ttk.Button(step1_frame, text="Launch Archinstall", command=self.launch_archinstall_thread)
-        self.launch_archinstall_button.pack(pady=10)
-
-        mount_point_frame = ttk.Frame(step1_frame)
-        mount_point_frame.pack(fill="x", pady=5)
-        ttk.Label(mount_point_frame, text="Target Mount Point (used by archinstall):").pack(side=tk.LEFT, padx=5)
-        mount_point_entry = ttk.Entry(mount_point_frame, textvariable=self.target_mount_point_var, width=40)
-        mount_point_entry.pack(side=tk.LEFT, fill="x", expand=True)
-
-
-        # Frame for Step 2: Mai Bloom Customizations
-        step2_frame = ttk.LabelFrame(self.root, text="Step 2: Apply Mai Bloom Customizations", padding=10)
-        step2_frame.pack(padx=10, pady=10, fill="x")
+    def run(self):
+        self.signals.log_message.emit("Attempting to launch archinstall in a new terminal...", False)
         
-        postinstall_intro_label = tk.Label(step2_frame, 
-                                           text="After 'archinstall' is completely finished and you have exited it,\n"
-                                                "verify the Target Mount Point above and click below to apply customizations.",
-                                           justify=tk.LEFT)
-        postinstall_intro_label.pack(pady=5, anchor="w")
-
-        self.run_postinstall_button = ttk.Button(step2_frame, text="Run Mai Bloom Post-Install", command=self.run_postinstall_thread, state=tk.DISABLED)
-        self.run_postinstall_button.pack(pady=10)
-
-        # Log/Status Area
-        log_frame = ttk.LabelFrame(self.root, text="Installer Log", padding=10)
-        log_frame.pack(padx=10, pady=10, fill="both", expand=True)
-        self.log_area = scrolledtext.ScrolledText(log_frame, height=10, width=80, state=tk.DISABLED, wrap=tk.WORD)
-        self.log_area.pack(fill="both", expand=True)
-
-        self.add_log("Mai Bloom Installer Ready.")
-        self.add_log(f"Please ensure you are running this installer with root privileges (sudo).")
-        self.add_log(f"Post-install scripts will be sourced from: ./{POST_INSTALL_SCRIPTS_DIR}/")
-        self.prepare_example_scripts()
-
-
-    def add_log(self, message, error=False):
-        self.log_area.config(state=tk.NORMAL)
-        prefix = "[ERROR] " if error else "[INFO] "
-        self.log_area.insert(tk.END, f"{prefix}{message}\n")
-        self.log_area.see(tk.END) # Scroll to the end
-        self.log_area.config(state=tk.DISABLED)
-        self.root.update_idletasks()
-
-    def prepare_example_scripts(self):
-        if not os.path.isdir(POST_INSTALL_SCRIPTS_DIR):
-            self.add_log(f"Creating directory for post-installation scripts: '{POST_INSTALL_SCRIPTS_DIR}'")
-            os.makedirs(POST_INSTALL_SCRIPTS_DIR, exist_ok=True)
-
-        for script_name in MAI_BLOOM_SCRIPTS:
-            example_script_path = os.path.join(POST_INSTALL_SCRIPTS_DIR, script_name)
-            if not os.path.exists(example_script_path) :
-                self.add_log(f"Creating an example post-install script: '{example_script_path}'")
-                with open(example_script_path, "w") as f:
-                    f.write("#!/bin/bash\n\n")
-                    f.write(f"echo '--- Running Mai Bloom Script: {script_name} ---'\n")
-                    f.write("echo 'Hello from inside the chroot of your new Mai Bloom OS!'\n")
-                    f.write("# Add your custom commands for this script here.\n")
-                    f.write(f"echo '--- {script_name} Finished ---'\n")
-                os.chmod(example_script_path, 0o755)
-                self.add_log(f"Please edit '{example_script_path}' with your desired commands.")
-
-    def launch_archinstall_thread(self):
-        self.launch_archinstall_button.config(state=tk.DISABLED)
-        self.add_log("Preparing to launch archinstall...")
-        threading.Thread(target=self._execute_archinstall, daemon=True).start()
-
-    def _execute_archinstall(self):
-        self.add_log("Archinstall will launch in a new terminal window.")
-        self.add_log("Follow the on-screen instructions in that new terminal.")
-        self.add_log(f"Key information: Target system mount point is expected to be '{self.target_mount_point_var.get()}'. "
-                     "Confirm or change this in the GUI if archinstall uses a different one.")
-        self.add_log("After archinstall finishes and you close its terminal, click the 'Run Mai Bloom Post-Install' button here.")
-
         terminal_commands_to_try = [
+            ["konsole", "-e", "sudo", "archinstall"],
             ["gnome-terminal", "--", "sudo", "archinstall"],
-            ["konsole", "-e", "sudo archinstall"], # Konsole -e often takes the whole command as one arg
-            ["xfce4-terminal", "-e", "sudo archinstall"],
-            ["xterm", "-e", "sudo archinstall"] 
+            ["xfce4-terminal", "--command=sudo archinstall"],
+            ["xterm", "-e", "sudo", "archinstall"]
         ]
         
-        launched_successfully = False
+        launched = False
+        terminal_used = "None"
         for cmd_parts in terminal_commands_to_try:
             try:
-                self.add_log(f"Trying to launch with: {' '.join(cmd_parts)}")
-                # For Popen, we don't want to wait. It opens in a new window.
-                # `sudo` might ask for password in the new terminal if not recently entered.
-                self.archinstall_process = subprocess.Popen(cmd_parts)
-                self.add_log(f"Archinstall launched with '{cmd_parts[0]}'. Please complete installation in that window.")
-                self.run_postinstall_button.config(state=tk.NORMAL) # Enable next step
-                launched_successfully = True
-                break 
+                subprocess.Popen(cmd_parts) # Launch and don't wait
+                self.signals.log_message.emit(f"Archinstall launched with '{cmd_parts[0]}'. Please complete installation in that window.", False)
+                terminal_used = cmd_parts[0]
+                launched = True
+                break
             except FileNotFoundError:
-                self.add_log(f"Terminal '{cmd_parts[0]}' not found. Trying next...")
+                self.signals.log_message.emit(f"Terminal '{cmd_parts[0]}' not found. Trying next...", True)
             except Exception as e:
-                self.add_log(f"Error launching with '{cmd_parts[0]}': {e}", error=True)
+                self.signals.log_message.emit(f"Error launching with '{cmd_parts[0]}': {e}", True)
         
-        if not launched_successfully:
-            self.add_log("ERROR: Failed to launch archinstall. No suitable terminal found or another error occurred.", error=True)
-            messagebox.showerror("Archinstall Error", "Could not launch archinstall.\nPlease ensure a common terminal (gnome-terminal, konsole, xfce4-terminal, xterm) is installed and `sudo archinstall` can be run.")
-        
-        self.launch_archinstall_button.config(state=tk.NORMAL) # Re-enable in case of launch failure
+        self.signals.archinstall_launched.emit(launched, terminal_used if launched else "No suitable terminal found.")
 
-    def run_postinstall_thread(self):
-        self.run_postinstall_button.config(state=tk.DISABLED)
-        self.add_log("Starting Mai Bloom post-installation process...")
-        threading.Thread(target=self._execute_postinstall_tasks, daemon=True).start()
+# --- Thread for Post-Installation Tasks ---
+class PostInstallThread(QThread):
+    signals = WorkerSignals()
 
-    def _execute_postinstall_tasks(self):
-        target_mp = self.target_mount_point_var.get()
-        if not target_mp:
-            self.add_log("ERROR: Target mount point is not specified.", error=True)
-            messagebox.showerror("Configuration Error", "Target mount point for the new system is not specified.")
-            self.run_postinstall_button.config(state=tk.NORMAL)
-            return
+    def __init__(self, target_mount_point):
+        super().__init__()
+        self.target_mount_point = target_mount_point
 
-        self.add_log(f"Target mount point set to: {target_mp}")
-
-        # Call the existing logic, adapted to use GUI logging
-        success = self._perform_mai_bloom_customizations_logic(target_mp)
-
-        if success:
-            self.add_log("Mai Bloom customizations completed successfully!")
-            messagebox.showinfo("Installation Complete", "Mai Bloom OS base installation and customizations are complete! You can now reboot.")
-        else:
-            self.add_log("Mai Bloom customizations encountered errors. Please check the log.", error=True)
-            messagebox.showerror("Post-Install Error", "Mai Bloom post-installation customizations failed. Please check the log for details.")
-        
-        self.run_postinstall_button.config(state=tk.NORMAL) # Re-enable button
-
-    def _run_command_gui_log(self, command_list, check=True, shell=False, cwd=None, env=None):
-        """Helper to run command and log to GUI's add_log."""
-        log_message = f"Executing: {' '.join(command_list) if isinstance(command_list, list) else command_list}"
-        if cwd: log_message += f" in {cwd}"
-        self.add_log(log_message)
-        
+    def _run_command_in_thread(self, command_list, check=True, capture_output=True):
+        """Runs a command and emits log signals."""
+        log_msg = f"Executing: {' '.join(command_list)}"
+        self.signals.log_message.emit(log_msg, False)
         try:
-            # For commands that might produce a lot of output, use Popen and stream it
-            process = subprocess.Popen(command_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=shell, cwd=cwd, env=env)
-            stdout, stderr = process.communicate() # Waits for completion
-
-            if stdout: self.add_log(f"Stdout:\n{stdout.strip()}")
-            if stderr: self.add_log(f"Stderr:\n{stderr.strip()}", error=True)
-            
-            if check and process.returncode != 0:
-                raise subprocess.CalledProcessError(process.returncode, command_list, output=stdout, stderr=stderr)
-            return process
+            process = subprocess.run(command_list, check=check, capture_output=capture_output, text=True)
+            if capture_output and process.stdout:
+                self.signals.log_message.emit(f"Stdout:\n{process.stdout.strip()}", False)
+            if capture_output and process.stderr:
+                self.signals.log_message.emit(f"Stderr:\n{process.stderr.strip()}", True) # Assume stderr is an error/warning
+            return process.returncode == 0
         except subprocess.CalledProcessError as e:
-            self.add_log(f"Error running command: {' '.join(e.cmd)}", error=True)
-            # No need to print stdout/stderr again if already logged
-            raise
+            self.signals.log_message.emit(f"Error running: {' '.join(e.cmd)}\nStdout: {e.stdout}\nStderr: {e.stderr}", True)
+            return False
         except FileNotFoundError:
-            self.add_log(f"Error: Command '{command_list[0]}' not found.", error=True)
-            raise
-
-    def _run_in_chroot_gui_log(self, mount_point, command_to_run_in_chroot):
-        chroot_command_list = ["arch-chroot", mount_point, "/bin/bash", "-c", command_to_run_in_chroot]
-        return self._run_command_gui_log(chroot_command_list)
-
-    def _perform_mai_bloom_customizations_logic(self, target_mount_point):
-        """Actual post-installation logic, using GUI logging."""
-        self.add_log(f"Applying customizations to system at {target_mount_point}...")
-
-        if not os.path.isdir(target_mount_point) or not os.path.exists(os.path.join(target_mount_point, 'bin/bash')):
-            self.add_log(f"ERROR: Target mount point '{target_mount_point}' does not look like a valid Linux root.", error=True)
+            self.signals.log_message.emit(f"Error: Command '{command_list[0]}' not found.", True)
+            return False
+        except Exception as e_gen:
+            self.signals.log_message.emit(f"General error with command {' '.join(command_list)}: {e_gen}", True)
             return False
 
-        all_tasks_successful = True
 
+    def _run_in_chroot_thread(self, command_to_run_in_chroot):
+        chroot_cmd_list = ["arch-chroot", self.target_mount_point, "/bin/bash", "-c", command_to_run_in_chroot]
+        return self._run_command_in_thread(chroot_cmd_list)
+
+    def run(self):
+        self.signals.log_message.emit(f"Starting Mai Bloom customizations on target: {self.target_mount_point}", False)
+
+        if not os.path.isdir(self.target_mount_point) or not os.path.exists(os.path.join(self.target_mount_point, 'bin/bash')):
+            self.signals.log_message.emit(f"ERROR: Target mount point '{self.target_mount_point}' does not look like a valid Linux root.", True)
+            self.signals.finished.emit(False)
+            return
+
+        overall_success = True
+
+        # 1. Install extra packages
         if EXTRA_PACKAGES:
-            self.add_log("--- Installing extra Mai Bloom packages ---")
+            self.signals.log_message.emit("--- Installing extra Mai Bloom packages ---", False)
             package_string = " ".join(shlex.quote(pkg) for pkg in EXTRA_PACKAGES)
-            try:
-                self._run_in_chroot_gui_log(target_mount_point, f"pacman -S --noconfirm --needed {package_string}")
-                self.add_log("Extra packages installed successfully.")
-            except Exception as e:
-                self.add_log(f"Failed to install extra packages: {e}", error=True)
-                all_tasks_successful = False # Mark as failed but continue with other scripts
-            self.add_log("") # Newline
+            if not self._run_in_chroot_thread(f"pacman -S --noconfirm --needed {package_string}"):
+                self.signals.log_message.emit("Failed to install one or more extra packages.", True)
+                overall_success = False # Mark as failed but continue with other scripts for now
+            else:
+                self.signals.log_message.emit("Extra packages installed successfully.", False)
+            self.signals.log_message.emit("", False) # Newline
 
+        # 2. Run custom Mai Bloom scripts
         if MAI_BLOOM_SCRIPTS:
-            self.add_log("--- Running Mai Bloom post-installation scripts ---")
+            self.signals.log_message.emit("--- Running Mai Bloom post-installation scripts ---", False)
             if not os.path.isdir(POST_INSTALL_SCRIPTS_DIR):
-                self.add_log(f"Warning: Scripts directory '{POST_INSTALL_SCRIPTS_DIR}' not found. Skipping scripts.", error=True)
+                self.signals.log_message.emit(f"Warning: Scripts directory '{POST_INSTALL_SCRIPTS_DIR}' not found. Skipping scripts.", True)
             else:
                 for script_name in MAI_BLOOM_SCRIPTS:
                     host_script_path = os.path.join(POST_INSTALL_SCRIPTS_DIR, script_name)
                     if not os.path.isfile(host_script_path):
-                        self.add_log(f"Warning: Script '{host_script_path}' not found. Skipping.", error=True)
+                        self.signals.log_message.emit(f"Warning: Script '{host_script_path}' not found. Skipping.", True)
                         continue
 
                     chroot_tmp_script_path = os.path.join("/tmp", os.path.basename(script_name))
-                    cp_target_path_on_host = os.path.join(target_mount_point, chroot_tmp_script_path.lstrip('/'))
+                    cp_target_path_on_host = os.path.join(self.target_mount_point, chroot_tmp_script_path.lstrip('/'))
 
-                    try:
-                        self.add_log(f"Preparing script: {script_name}")
-                        self._run_command_gui_log(["cp", host_script_path, cp_target_path_on_host])
-                        self._run_in_chroot_gui_log(target_mount_point, f"chmod +x {chroot_tmp_script_path}")
+                    self.signals.log_message.emit(f"Preparing script: {script_name}", False)
+                    if not self._run_command_in_thread(["cp", host_script_path, cp_target_path_on_host], capture_output=False): # cp doesn't output much unless error
+                        self.signals.log_message.emit(f"Failed to copy script '{script_name}' to target.", True)
+                        overall_success = False; continue
+                    
+                    if not self._run_in_chroot_thread(f"chmod +x {chroot_tmp_script_path}"):
+                        self.signals.log_message.emit(f"Failed to make script '{script_name}' executable in chroot.", True)
+                        overall_success = False; continue
                         
-                        self.add_log(f"Executing '{chroot_tmp_script_path}' inside chroot...")
-                        self._run_in_chroot_gui_log(target_mount_point, chroot_tmp_script_path)
-                        self.add_log(f"Script '{script_name}' executed successfully.")
+                    self.signals.log_message.emit(f"Executing '{chroot_tmp_script_path}' inside chroot...", False)
+                    if not self._run_in_chroot_thread(chroot_tmp_script_path):
+                        self.signals.log_message.emit(f"Script '{script_name}' execution failed or had errors.", True)
+                        overall_success = False
+                    else:
+                        self.signals.log_message.emit(f"Script '{script_name}' executed.", False)
 
-                        self._run_in_chroot_gui_log(target_mount_point, f"rm -f {chroot_tmp_script_path}")
-                        self.add_log(f"Cleaned up script '{chroot_tmp_script_path}'.")
-                    except Exception as e:
-                        self.add_log(f"Failed to execute script '{script_name}': {e}", error=True)
-                        all_tasks_successful = False
-                    self.add_log("-" * 20)
+                    self._run_in_chroot_thread(f"rm -f {chroot_tmp_script_path}") # Try to clean up
+                    self.signals.log_message.emit("-" * 20, False)
         else:
-            self.add_log("No Mai Bloom post-installation scripts defined.")
+            self.signals.log_message.emit("No Mai Bloom post-installation scripts defined.", False)
         
-        return all_tasks_successful
+        self.signals.finished.emit(overall_success)
 
-# --- Main GUI Execution ---
-def main_gui():
+
+# --- Main Application Window ---
+class MaiBloomInstallerWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.target_mount_point_var_internal = DEFAULT_TARGET_MOUNT_POINT # Internal storage
+        self.initUI()
+        self.prepare_example_scripts_if_needed()
+
+    def initUI(self):
+        self.setWindowTitle("Mai Bloom OS Installer")
+        self.setGeometry(200, 200, 700, 550) # x, y, width, height
+
+        self.main_layout = QVBoxLayout(self)
+
+        # Welcome Label
+        welcome_label = QLabel("Welcome to the Mai Bloom OS Installer!", self)
+        font = QFont()
+        font.setPointSize(16)
+        welcome_label.setFont(font)
+        welcome_label.setAlignment(Qt.AlignCenter)
+        self.main_layout.addWidget(welcome_label)
+
+        # Step 1: Archinstall Group
+        step1_group = QGroupBox("Step 1: Base Arch Linux Installation", self)
+        step1_layout = QVBoxLayout()
+        
+        archinstall_label1 = QLabel(
+            "Click below to launch 'archinstall' in a new terminal window.\n"
+            "Follow its instructions to install the base Arch Linux system.", self)
+        archinstall_label1.setWordWrap(True)
+        step1_layout.addWidget(archinstall_label1)
+
+        self.launch_archinstall_button = QPushButton("Launch Archinstall", self)
+        self.launch_archinstall_button.clicked.connect(self.start_archinstall_process)
+        step1_layout.addWidget(self.launch_archinstall_button, alignment=Qt.AlignCenter)
+        
+        archinstall_label2 = QLabel(
+            "IMPORTANT: Note the root (/) mount point archinstall uses for the new system.", self)
+        archinstall_label2.setWordWrap(True)
+        step1_layout.addWidget(archinstall_label2)
+
+        mount_point_layout = QHBoxLayout()
+        mount_point_layout.addWidget(QLabel("Target Mount Point:", self))
+        self.mount_point_entry = QLineEdit(DEFAULT_TARGET_MOUNT_POINT, self)
+        mount_point_layout.addWidget(self.mount_point_entry)
+        step1_layout.addLayout(mount_point_layout)
+
+        step1_group.setLayout(step1_layout)
+        self.main_layout.addWidget(step1_group)
+
+        # Step 2: Mai Bloom Customizations Group
+        step2_group = QGroupBox("Step 2: Apply Mai Bloom Customizations", self)
+        step2_layout = QVBoxLayout()
+
+        postinstall_label = QLabel(
+            "After 'archinstall' is completely finished and you have exited its terminal,\n"
+            "verify the Target Mount Point above, then click below to apply customizations.", self)
+        postinstall_label.setWordWrap(True)
+        step2_layout.addWidget(postinstall_label)
+
+        self.run_postinstall_button = QPushButton("Run Mai Bloom Post-Install", self)
+        self.run_postinstall_button.clicked.connect(self.start_postinstall_process)
+        self.run_postinstall_button.setEnabled(False) # Initially disabled
+        step2_layout.addWidget(self.run_postinstall_button, alignment=Qt.AlignCenter)
+
+        step2_group.setLayout(step2_layout)
+        self.main_layout.addWidget(step2_group)
+
+        # Log Area
+        log_group = QGroupBox("Installer Log", self)
+        log_layout = QVBoxLayout()
+        self.log_area = QTextEdit(self)
+        self.log_area.setReadOnly(True)
+        self.log_area.setFont(QFont("Monospace", 9))
+        log_layout.addWidget(self.log_area)
+        log_group.setLayout(log_layout)
+        self.main_layout.addWidget(log_group)
+        
+        self.setLayout(self.main_layout)
+        self.show()
+
+    def add_log_message_slot(self, message, is_error=False):
+        if is_error:
+            self.log_area.append(f"<font color='red'>[ERROR] {message}</font>")
+        else:
+            self.log_area.append(f"[INFO] {message}")
+        self.log_area.ensureCursorVisible() # Auto-scroll
+
+    def prepare_example_scripts_if_needed(self):
+        self.add_log_message_slot(f"Post-install scripts will be looked for in: ./{POST_INSTALL_SCRIPTS_DIR}/")
+        if not os.path.isdir(POST_INSTALL_SCRIPTS_DIR):
+            self.add_log_message_slot(f"Creating directory: '{POST_INSTALL_SCRIPTS_DIR}'")
+            os.makedirs(POST_INSTALL_SCRIPTS_DIR, exist_ok=True)
+
+        for script_name in MAI_BLOOM_SCRIPTS: # Use MAI_BLOOM_SCRIPTS constant
+            example_script_path = os.path.join(POST_INSTALL_SCRIPTS_DIR, script_name)
+            if not os.path.exists(example_script_path) :
+                self.add_log_message_slot(f"Creating example script: '{example_script_path}'")
+                try:
+                    with open(example_script_path, "w") as f:
+                        f.write("#!/bin/bash\n\n")
+                        f.write(f"echo '--- Running Mai Bloom Script: {script_name} ---'\n")
+                        f.write("# Add your custom commands here.\n")
+                        f.write(f"echo '--- {script_name} Finished ---'\n")
+                    os.chmod(example_script_path, 0o755)
+                except Exception as e:
+                    self.add_log_message_slot(f"Could not create example script {example_script_path}: {e}", True)
+        self.add_log_message_slot("Mai Bloom Installer Ready.")
+
+
+    def start_archinstall_process(self):
+        self.launch_archinstall_button.setEnabled(False)
+        self.add_log_message_slot("Archinstall launch initiated...")
+
+        self.archinstall_thread = ArchinstallLauncherThread()
+        self.archinstall_thread.signals.log_message.connect(self.add_log_message_slot)
+        self.archinstall_thread.signals.archinstall_launched.connect(self.on_archinstall_launched)
+        self.archinstall_thread.start()
+
+    def on_archinstall_launched(self, launched_successfully, message):
+        if launched_successfully:
+            self.add_log_message_slot(f"Archinstall reported as launched with terminal: {message}")
+            self.add_log_message_slot("Please complete the installation in the archinstall terminal.")
+            self.add_log_message_slot("Once done, close that terminal and click 'Run Mai Bloom Post-Install'.")
+            self.run_postinstall_button.setEnabled(True)
+        else:
+            self.add_log_message_slot(f"Archinstall launch failed: {message}", True)
+            QMessageBox.critical(self, "Archinstall Error", f"Failed to launch archinstall: {message}")
+        self.launch_archinstall_button.setEnabled(True) # Re-enable button always
+
+    def start_postinstall_process(self):
+        self.target_mount_point_var_internal = self.mount_point_entry.text().strip()
+        if not self.target_mount_point_var_internal:
+            QMessageBox.warning(self, "Input Error", "Please specify the target mount point used by archinstall.")
+            return
+
+        self.run_postinstall_button.setEnabled(False)
+        self.add_log_message_slot(f"Starting post-installation tasks for target: {self.target_mount_point_var_internal}")
+
+        self.postinstall_thread = PostInstallThread(self.target_mount_point_var_internal)
+        self.postinstall_thread.signals.log_message.connect(self.add_log_message_slot)
+        self.postinstall_thread.signals.finished.connect(self.on_postinstall_finished)
+        self.postinstall_thread.start()
+
+    def on_postinstall_finished(self, success):
+        if success:
+            self.add_log_message_slot("Mai Bloom customizations completed successfully!")
+            QMessageBox.information(self, "Success", "Mai Bloom OS installation and customizations are complete! You can now reboot.")
+        else:
+            self.add_log_message_slot("Mai Bloom customizations encountered errors. Please check the log for details.", True)
+            QMessageBox.critical(self, "Post-Install Error", "Mai Bloom post-installation customizations failed. Please check the log for details.")
+        self.run_postinstall_button.setEnabled(True)
+
+# --- Main Execution ---
+def main():
     if os.geteuid() != 0:
-        # Try to show a Tkinter error box even if main app isn't fully set up
-        try:
-            root_err = tk.Tk()
-            root_err.withdraw() # Hide the main window
-            messagebox.showerror("Permission Error", "This script must be run with root privileges (e.g., using `sudo python script_name.py`).")
-        except tk.TclError: # In case Tkinter can't initialize (e.g. no DISPLAY)
-            print("ERROR: This script must be run with root privileges (e.g., using `sudo python script_name.py`).", file=sys.stderr)
+        # We need a QApplication instance to show QMessageBox even for early exit
+        app_err = QApplication(sys.argv)
+        QMessageBox.critical(None, "Permission Error", "This script must be run with root privileges (e.g., using `sudo python script_name.py`).")
         sys.exit(1)
         
-    main_window = tk.Tk()
-    app = MaiBloomInstallerApp(main_window)
-    main_window.mainloop()
+    app = QApplication(sys.argv)
+    installer_window = MaiBloomInstallerWindow()
+    sys.exit(app.exec_())
 
 if __name__ == "__main__":
-    main_gui()
+    main()
