@@ -36,16 +36,17 @@ class InstallerWindow(QWidget):
         self.setLayout(layout)
 
     def onProceed(self):
-        subprocess.Popen([
+        firefox_proc = subprocess.Popen([
             "konsole",
-            "--geometry", "80x24+800+0",
             "-e", "bash", "-c", "firefox maibloom.github.io; exec bash"
         ])
-        subprocess.Popen([
+        time.sleep(2)
+        subprocess.call(["wmctrl", "-r", "Mozilla Firefox", "-e", "0,800,0,800,600"])
+               arch_proc = subprocess.Popen([
             "konsole",
-            "--geometry", "80x24+0+0",
             "-e", "bash", "-c", "archinstall; exec bash"
         ])
+        subprocess.call(["wmctrl", "-r", "Konsole", "-e", "0,0,0,800,600"])
         self.close()
 
 if __name__ == '__main__':
