@@ -38,7 +38,7 @@ class InstallerWindow(QWidget):
     def onProceed(self):
         subprocess.Popen(["konsole", "-e", "bash", "-c", "firefox maibloom.github.io; exec bash"])
         time.sleep(2)
-        subprocess.Popen(["konsole", "-e", "bash", "-c", "archinstall; exec bash"])
+        subprocess.Popen(["konsole", "-e", "bash", "-c", "archinstall && sudo bash config.sh; exec bash"])
         self.close()
 
 if __name__ == '__main__':
