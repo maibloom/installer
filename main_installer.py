@@ -42,7 +42,7 @@ class InstallerWindow(QWidget):
         ])
         time.sleep(2)
         subprocess.call(["wmctrl", "-r", "Mozilla Firefox", "-e", "0,800,0,800,600"])
-               arch_proc = subprocess.Popen([
+        arch_proc = subprocess.Popen([
             "konsole",
             "-e", "bash", "-c", "archinstall; exec bash"
         ])
