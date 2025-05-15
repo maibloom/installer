@@ -19,7 +19,7 @@ class InstallerWindow(QWidget):
         message = (
             "Welcome!\n\n"
             "Your operating system will be installed using archinstall.\n"
-            "The archinstall terminal and Firefox documentation will appear side-by-side.\n\n"
+            "Once installation is complete, additional configurations will be applied.\n\n"
             "Please ensure you have read the documentation before proceeding."
         )
         label = QLabel(message, self)
@@ -36,41 +36,9 @@ class InstallerWindow(QWidget):
         self.setLayout(layout)
 
     def onProceed(self):
-        arch_konsole_title = "Archinstall_Process_Window"
-        firefox_url = "maibloom.github.io"
-        firefox_main_window_title = "Mozilla Firefox"
-        
-        arch_geom = "0,0,0,800,600" 
-        firefox_geom = "0,800,0,800,600"
-
-        arch_command = f"archinstall; exec bash"
-        subprocess.Popen([
-            "konsole",
-            "--title", arch_konsole_title,
-            "-e", "bash", "-c", arch_command
-        ])
-
-        firefox_launcher_konsole_title = "Firefox_Launcher_Konsole"
-        firefox_launch_command = f"firefox --new-window {firefox_url}; exec bash"
-        subprocess.Popen([
-            "konsole",
-            "--title", firefox_launcher_konsole_title,
-            "-e", "bash", "-c", firefox_launch_command
-        ])
-
-        time.sleep(5) 
-
-        subprocess.call([
-            "wmctrl", "-r", arch_konsole_title,
-            "-e", arch_geom
-        ])
-        
-        time.sleep(2) 
-        subprocess.call([
-            "wmctrl", "-r", firefox_main_window_title,
-            "-e", firefox_geom
-        ])
-
+        subprocess.Popen(["konsole", "-e", "bash", "-c", "firefox maibloom.github.io; exec bash"])
+        time.sleep(4)
+        subprocess.Popen(["konsole", "-e", "bash", "-c", "archinstall; exec bash"])
         self.close()
 
 if __name__ == '__main__':
@@ -78,4 +46,3 @@ if __name__ == '__main__':
     window = InstallerWindow()
     window.show()
     sys.exit(app.exec_())
-
