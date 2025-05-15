@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import subprocess
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QPushButton, QMessageBox
 from PyQt5.QtGui import QFont
 
@@ -34,7 +35,8 @@ class InstallerWindow(QWidget):
         self.setLayout(layout)
 
     def onProceed(self):
-        QMessageBox.information(self, "Proceeding", "Installation will now begin.", QMessageBox.Ok)
+        subprocess.Popen(["konsole", "-e", "bash", "-c", "firefox maibloom.github.io; exec bash"])
+        subprocess.Popen(["konsole", "-e", "bash", "-c", "archinstall; exec bash"])
         self.close()
 
 if __name__ == '__main__':
