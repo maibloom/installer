@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys
 import subprocess
+import time
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QPushButton, QMessageBox
 from PyQt5.QtGui import QFont
 
@@ -36,6 +37,7 @@ class InstallerWindow(QWidget):
 
     def onProceed(self):
         subprocess.Popen(["konsole", "-e", "bash", "-c", "firefox maibloom.github.io; exec bash"])
+        time.sleep(4)
         subprocess.Popen(["konsole", "-e", "bash", "-c", "archinstall; exec bash"])
         self.close()
 
