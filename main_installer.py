@@ -39,7 +39,7 @@ class InstallerWindow(QWidget):
         subprocess.Popen(["konsole", "-e", "bash", "-c", "firefox maibloom.github.io; exec bash"])
         time.sleep(2)
         subprocess.Popen(["konsole", "-e", "bash", "-c", "archinstall && arch-chroot && sudo pacman -Syu git --noconfirm && sudo rm -rf installer/ && git clone https://github
-com/maibloom/installer && cd installer/ && chmod +x config.sh && sudo bash config.sh; exec bash"])
+com/maibloom/installer && cd installer/ && chmod +x config.sh && sudo bash config.sh"; exec bash"])
         self.close()
 
 if __name__ == '__main__':
