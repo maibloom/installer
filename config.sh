@@ -1,5 +1,7 @@
 cd /tmp/
 
+sudo rm -rf omnipkg-app/
+
 git clone https://www.github.com/maibloom/omnipkg-app
 
 cd omnipkg-app/
