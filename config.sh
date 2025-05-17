@@ -12,3 +12,4 @@ if sudo bash build.sh; then
   omnipkg put install maibloom-builder
 else
   echo "running build has failed"
+fi
