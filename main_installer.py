@@ -38,7 +38,17 @@ class InstallerWindow(QWidget):
     def onProceed(self):
         subprocess.Popen(["konsole", "-e", "bash", "-c", "firefox maibloom.github.io; exec bash"])
         time.sleep(2)
-        if subprocess.Popen(["konsole", "-e", "bash", "-c", "archinstall; exec bash"]):
+        proc_archinstall = subprocess.Popen(
+            ["konsole", "-e", "bash", "-c", "archinstall"]
+        )
+        exit_code = proc_archinstall.wait()
+        if exit_code == 0:
+            proc_next = subprocess.Popen(
+                ["arch-chroot /mnt/ && sudo pacman -Syu git --noconfirm && sudo rm -rf installer/ && git clone https://github.com/maibloom/installer && cd installer/ && chmod +x config.sh && sudo bash config.sh; exec bash"]
+            )
+            proc_next.wait()
+        else:
+            print("Error: archinstall did not complete successfully.")
   
         self.close()
 
