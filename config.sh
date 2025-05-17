@@ -1,7 +1,3 @@
-arch-chroot /mnt
-
-pacman -Syu git --no-confirm
-
 cd /tmp/
 
 git clone https://www.github.com/maibloom/omnipkg-app
