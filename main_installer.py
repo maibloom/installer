@@ -65,14 +65,14 @@ class InstallerWindow(QWidget):
                 "cd /installer && "
                 "chmod +x config.sh && "
                 "echo 'Made config.sh executable.' && "
-                "./config.sh && " 
-                "echo 'Post-installation script (config.sh) finished. You can close this terminal.' && "
+                "./config.sh && "
+                "echo 'Post-installation script (config.sh) finished. You can close this terminal.' ; "
                 "exec bash"
             )
             
-            post_install_konsole_command = f"arch-chroot /mnt /bin/bash -c '{post_install_chroot_script}'"
+            post_install_command = f'arch-chroot /mnt /bin/bash -c "{post_install_chroot_script}"'
             
-            post_install_process = subprocess.Popen(["konsole", "-e", "bash", "-c", post_install_konsole_command])
+            post_install_process = subprocess.Popen(post_install_command, shell=True)
             
             QMessageBox.information(self, "Post-Installation Steps", 
                                     "Post-installation configuration has been launched in a new terminal window.\n"
