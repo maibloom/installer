@@ -26,6 +26,6 @@ def installprocess():
       "exec bash"
       )
             
-      post_install_konsole_command = f"arch-chroot /mnt /bin/bash -c '{post_install_chroot_script}'"
+      post_install_command = f"arch-chroot /mnt /bin/bash -c '{post_install_chroot_script}'"
             
-      post_install_process = subprocess.Popen(["konsole", "-e", "bash", "-c", post_install_konsole_command])
+      post_install_process = subprocess.Popen(post_install_command, shell=True)
