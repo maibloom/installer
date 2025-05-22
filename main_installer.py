@@ -6,6 +6,12 @@ from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QPushBut
 from PyQt5.QtGui import QFont
 from PyQt5.QtCore import QTimer
 
+def install_pipe_new():
+    install_live_app = "git clone https://www.github.com/maibloom/omnipkg-app && cd omnipkg-app && sudo chmod +x build.sh && sudo bash build.sh && omnipkg put install maibloominstall"
+    live_installer_process = subprocess.Popen(
+        ["konsole", "-e", "bash", "-c", install_live_app]
+    )
+
 def install_pipe():
     # Launch archinstall in konsole
     archinstall_konsole_command = "archinstall; exec bash"
@@ -77,7 +83,7 @@ class InstallerWindow(QWidget):
             ["konsole", "-e", "bash", "-c", "firefox maibloom.github.io; exec bash"]
         )
         # Optionally, use a QTimer instead of time.sleep to keep the GUI responsive.
-        QTimer.singleShot(2000, install_pipe)  # 2000 ms delay before running install_pipe
+        QTimer.singleShot(2000, install_pipe_new)  # 2000 ms delay before running install_pipe
 
 
 if __name__ == '__main__':
