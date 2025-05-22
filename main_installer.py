@@ -8,7 +8,7 @@ from PyQt5.QtCore import QTimer
 
 def install_pipe():
     # Launch archinstall in konsole
-    archinstall_konsole_command = "firefox maibloom.github.io && archinstall; exec bash"
+    archinstall_konsole_command = "archinstall; exec bash"
     archinstall_process = subprocess.Popen(
         ["konsole", "-e", "bash", "-c", archinstall_konsole_command]
     )
@@ -73,9 +73,9 @@ class InstallerWindow(QWidget):
 
     def on_proceed(self):
         # Open a separate konsole window that launches Firefox for documentation
-        # subprocess.Popen(
-        #     ["konsole", "-e", "bash", "-c", "firefox maibloom.github.io; exec bash"]
-        # )
+        subprocess.Popen(
+            ["konsole", "-e", "bash", "-c", "firefox maibloom.github.io; exec bash"]
+        )
         # Optionally, use a QTimer instead of time.sleep to keep the GUI responsive.
         QTimer.singleShot(2000, install_pipe)  # 2000 ms delay before running install_pipe
 
