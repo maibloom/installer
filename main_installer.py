@@ -74,7 +74,7 @@ class InstallerWindow(QWidget):
     def on_proceed(self):
         # Open a separate konsole window that launches Firefox for documentation
         subprocess.Popen(
-            ["konsole", "-e", "bash", "-c", "firefox https://github.com/maibloom/iso/blob/main/README.md; exec bash"]
+            ["konsole", "-e", "bash", "-c", "firefox https://github.com/maibloom/iso/blob/main/README.md#installation-steps-%EF%B8%8F; exec bash"]
         )
         # Optionally, use a QTimer instead of time.sleep to keep the GUI responsive.
         QTimer.singleShot(2000, install_pipe)  # 2000 ms delay before running install_pipe
